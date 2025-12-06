@@ -1,0 +1,33 @@
+[package]
+name = "svarog-datacore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "DataCore binary database parser for Star Citizen game data"
+
+[dependencies]
+svarog-common.workspace = true
+byteorder.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+memmap2.workspace = true
+parking_lot = { workspace = true, optional = true }
+hashbrown.workspace = true
+rustc-hash.workspace = true
+bumpalo.workspace = true
+memchr.workspace = true
+
+[features]
+default = ["xml-export", "json-export"]
+xml-export = ["quick-xml"]
+json-export = ["serde", "serde_json"]
+parallel = ["rayon", "parking_lot"]
+
+[dev-dependencies]

@@ -1,0 +1,31 @@
+[package]
+name = "svarog-p4k"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "P4K archive reader for Star Citizen game files"
+
+[dependencies]
+svarog-common.workspace = true
+byteorder.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+flate2.workspace = true
+aes.workspace = true
+cbc.workspace = true
+cipher.workspace = true
+memmap2.workspace = true
+rayon = { workspace = true, optional = true }
+crossbeam-channel = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+memchr.workspace = true
+
+[features]
+default = []
+parallel = ["rayon", "crossbeam-channel", "parking_lot"]
+
+[dev-dependencies]

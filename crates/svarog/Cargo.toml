@@ -1,0 +1,24 @@
+[package]
+name = "svarog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Star Citizen game file extraction and analysis library"
+
+[dependencies]
+svarog-common.workspace = true
+svarog-p4k.workspace = true
+svarog-cryxml.workspace = true
+svarog-datacore.workspace = true
+svarog-chf.workspace = true
+svarog-dds.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["full"]
+full = ["svarog-cryxml/xml-output", "svarog-datacore/xml-export", "svarog-datacore/json-export"]
+
+[dev-dependencies]

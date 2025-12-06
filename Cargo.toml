@@ -1,0 +1,106 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/svarog-common",
+    "crates/svarog-p4k",
+    "crates/svarog-cryxml",
+    "crates/svarog-datacore",
+    "crates/svarog-chf",
+    "crates/svarog-dds",
+    "crates/svarog",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/diogotr7/Svarog"
+authors = ["Diogo Teixeira"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Internal crates
+svarog-common = { path = "crates/svarog-common" }
+svarog-p4k = { path = "crates/svarog-p4k" }
+svarog-cryxml = { path = "crates/svarog-cryxml" }
+svarog-datacore = { path = "crates/svarog-datacore" }
+svarog-chf = { path = "crates/svarog-chf" }
+svarog-dds = { path = "crates/svarog-dds" }
+svarog = { path = "crates/svarog" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# Binary parsing
+byteorder = "1.5"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+# Compression
+zstd = "0.13"
+flate2 = "1.0"
+
+# Encryption
+aes = "0.8"
+cbc = "0.1"
+cipher = "0.4"
+
+# Hashing
+crc32c = "0.6"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+indicatif = "0.17"
+
+# Parallelism
+rayon = "1.10"
+crossbeam-channel = "0.5"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Utilities
+memmap2 = "0.9"
+glob = "0.3"
+parking_lot = "0.12"
+bumpalo = { version = "3.16", features = ["collections"] }
+hashbrown = { version = "0.15", features = ["rayon"] }
+rustc-hash = "2.1"
+
+# SIMD
+wide = "0.7"
+memchr = "2.7"
+
+[package]
+name = "svarog-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "CLI tool for Star Citizen game file extraction and analysis"
+
+[[bin]]
+name = "svarog"
+path = "src/main.rs"
+
+[dependencies]
+svarog.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+anyhow.workspace = true
+rayon.workspace = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false

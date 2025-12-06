@@ -1,0 +1,73 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.sw?
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Test and sample data
+*.p4k
+*.dcb
+*.chf
+*.dds
+!/crates/*/tests/**/*.dds
+
+# Output directories
+/output/
+/extracted/
+/datacore/
+
+# Profiling and benchmarks
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+cachegrind.out.*
+callgrind.out.*
+
+# Documentation build
+/target/doc/
+
+# Coverage reports
+/coverage/
+*.lcov
+tarpaulin-report.html
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Legacy .NET project (moved to legacy/)
+# Keep legacy/ tracked but ignore build artifacts within
+legacy/**/bin/
+legacy/**/obj/
+legacy/**/.vs/
+legacy/**/*.user
+legacy/**/*.suo

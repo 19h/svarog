@@ -1,0 +1,21 @@
+[package]
+name = "svarog-dds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "DDS texture file handling for Star Citizen split mipmap files"
+
+[dependencies]
+svarog-common.workspace = true
+byteorder.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+glob.workspace = true
+
+[features]
+default = []
+
+[dev-dependencies]

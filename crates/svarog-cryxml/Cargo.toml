@@ -1,0 +1,22 @@
+[package]
+name = "svarog-cryxml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "CryXmlB binary XML parser for Star Citizen files"
+
+[dependencies]
+svarog-common.workspace = true
+byteorder.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+quick-xml = { workspace = true, optional = true }
+
+[features]
+default = ["xml-output"]
+xml-output = ["quick-xml"]
+
+[dev-dependencies]

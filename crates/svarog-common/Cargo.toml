@@ -1,0 +1,22 @@
+[package]
+name = "svarog-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Common utilities for Svarog - binary reading, types, and hashing"
+
+[dependencies]
+byteorder.workspace = true
+zerocopy.workspace = true
+thiserror.workspace = true
+crc32c.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dev-dependencies]
