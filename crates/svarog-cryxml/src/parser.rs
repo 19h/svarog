@@ -74,6 +74,7 @@ impl CryXml {
     }
 
     /// Get a string from the string table by offset.
+    /// Uses SIMD-accelerated null-terminator search via memchr.
     pub fn get_string(&self, offset: u32) -> Result<&str> {
         let offset = offset as usize;
         if offset >= self.string_data.len() {
@@ -83,10 +84,8 @@ impl CryXml {
             });
         }
 
-        // Find null terminator
-        let end = self.string_data[offset..]
-            .iter()
-            .position(|&b| b == 0)
+        // Find null terminator using SIMD-accelerated memchr
+        let end = svarog_common::memchr::memchr(0, &self.string_data[offset..])
             .unwrap_or(self.string_data.len() - offset);
 
         let slice = &self.string_data[offset..offset + end];

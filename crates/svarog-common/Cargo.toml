@@ -13,6 +13,7 @@ byteorder.workspace = true
 zerocopy.workspace = true
 thiserror.workspace = true
 crc32c.workspace = true
+memchr.workspace = true
 serde = { workspace = true, optional = true }
 
 [features]
