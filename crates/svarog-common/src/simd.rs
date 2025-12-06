@@ -226,7 +226,10 @@ unsafe fn find_content_end_sse2(data: &[u8]) -> usize {
         let mask = _mm_movemask_epi8(cmp) as u16;
 
         if mask != 0xFFFF {
-            let leading_zeros = (!mask).leading_zeros() as usize - 16;
+            // Find the highest set bit in the inverted mask (highest non-zero byte)
+            // Use u16::leading_zeros directly to avoid integer promotion issues
+            let inverted = !mask;
+            let leading_zeros = inverted.leading_zeros() as usize;
             return chunk_start + (16 - leading_zeros);
         }
         pos = chunk_start;
@@ -264,18 +267,21 @@ unsafe fn is_all_zeros_neon(data: &[u8]) -> bool {
 #[target_feature(enable = "neon")]
 unsafe fn count_nonzero_neon(data: &[u8]) -> usize {
     let zeros = vdupq_n_u8(0);
+    let ones = vdupq_n_u8(1);
     let mut count = 0usize;
     let mut i = 0;
 
     while i + 16 <= data.len() {
         let chunk = vld1q_u8(data.as_ptr().add(i));
+        // Compare with zero: 0xFF where equal, 0x00 where not equal
         let cmp = vceqq_u8(chunk, zeros);
-
-        // Count zeros in comparison result (0xFF = zero byte, 0x00 = non-zero)
-        // Invert and count
-        let non_zero = vmvnq_u8(cmp);
-        let sum = vaddvq_u8(non_zero);
-        count += (sum / 255) as usize;
+        // Invert: 0xFF where non-zero, 0x00 where zero
+        let non_zero_mask = vmvnq_u8(cmp);
+        // AND with 1s to get 0x01 for non-zero bytes, 0x00 for zero bytes
+        let non_zero_ones = vandq_u8(non_zero_mask, ones);
+        // Sum all the 1s
+        let sum = vaddvq_u8(non_zero_ones);
+        count += sum as usize;
         i += 16;
     }
 

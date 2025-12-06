@@ -23,38 +23,39 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: svarog-linux-x86_64
-            cross: false
+            can_test: true
 
-          # Linux ARM64
+          # Linux ARM64 (cross-compiled, no tests)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: svarog-linux-aarch64
             cross: true
+            can_test: false
 
-          # macOS x86_64
+          # macOS x86_64 (use Intel runner)
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             name: svarog-macos-x86_64
-            cross: false
+            can_test: true
 
-          # macOS ARM64 (Apple Silicon)
+          # macOS ARM64 (Apple Silicon runner)
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             name: svarog-macos-aarch64
-            cross: false
+            can_test: true
 
           # Windows x86_64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: svarog-windows-x86_64
-            cross: false
+            can_test: true
             ext: .exe
 
-          # Windows ARM64
+          # Windows ARM64 (cross-compiled on x64, no tests)
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             name: svarog-windows-aarch64
-            cross: false
+            can_test: false
             ext: .exe
 
     steps:
@@ -87,7 +88,7 @@ jobs:
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Run tests
-        if: ${{ !matrix.cross }}
+        if: matrix.can_test
         run: cargo test --all --all-features --target ${{ matrix.target }}
 
       - name: Create archive (Unix)

@@ -12,14 +12,38 @@ A high-performance Rust library and CLI for extracting and parsing Star Citizen 
 
 ## Performance
 
-Svarog is heavily optimized for maximum throughput:
+Svarog is heavily optimized for maximum throughput with cross-platform SIMD acceleration:
 
-- **SIMD-accelerated** null padding detection (AVX2/SSE2)
+### SIMD Support
+
+| Architecture | Instruction Sets | Operations |
+|-------------|------------------|------------|
+| x86_64 | AVX2, SSE2 | Null detection, pattern search, slice comparison |
+| aarch64 | NEON | Null detection, pattern search, slice comparison |
+| Other | Scalar (u64) | Fallback with optimized u64 reads |
+
+All SIMD features are **runtime-detected** on x86_64, ensuring optimal performance on any CPU.
+
+### Optimizations
+
+- **SIMD-accelerated** null padding detection and byte searching (via memchr)
 - **Zero-copy** memory-mapped file access
 - **Parallel extraction** with rayon (with `parallel` feature)
 - **FxHashMap** for O(1) lookups with fast hashing
-- **String interning** to minimize allocations
+- **String interning** with arena allocation to minimize allocations
 - **AES-NI** hardware acceleration for decryption
+- **CRC32C** hardware acceleration (SSE4.2 on x86, ARMv8 CRC)
+
+## Supported Platforms
+
+| Platform | Architecture | Status |
+|----------|-------------|--------|
+| Linux | x86_64 | Full SIMD (AVX2/SSE2) |
+| Linux | aarch64 | Full SIMD (NEON) |
+| macOS | x86_64 | Full SIMD (AVX2/SSE2) |
+| macOS | aarch64 (Apple Silicon) | Full SIMD (NEON) |
+| Windows | x86_64 | Full SIMD (AVX2/SSE2) |
+| Windows | aarch64 | Full SIMD (NEON) |
 
 ## Installation
 
@@ -179,12 +203,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Example: Using SIMD Utilities
+
+```rust
+use svarog_common::simd;
+
+// Find content end (skip null padding) - uses AVX2/SSE2/NEON
+let data = vec![1u8; 1000];
+let content_end = simd::find_content_end(&data);
+
+// Check if slice is all zeros - SIMD accelerated
+let zeros = vec![0u8; 1000];
+assert!(simd::is_all_zeros(&zeros));
+
+// Fast byte search via memchr
+let pos = simd::find_byte(0x50, &data);
+```
+
 ## Crate Structure
 
 | Crate | Description |
 |-------|-------------|
 | `svarog` | Umbrella crate re-exporting all functionality |
-| `svarog-common` | Binary reading, CigGuid, CRC32C utilities |
+| `svarog-common` | Binary reading, CigGuid, CRC32C, **SIMD utilities** |
 | `svarog-p4k` | P4K archive reader (ZIP64 + AES + Zstd) |
 | `svarog-cryxml` | CryXmlB binary XML parser |
 | `svarog-datacore` | DCB database parser + XML export |
