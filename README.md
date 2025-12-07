@@ -5,8 +5,19 @@ A high-performance Rust library and CLI for extracting and parsing Star Citizen 
 ## Features
 
 - **P4K Archive Extraction** - Read Star Citizen's ZIP64 archives with AES encryption and Zstandard compression
-- **DataCore Database Parsing** - Parse `.dcb` game database files and export to XML
-- **CryXmlB Conversion** - Convert binary XML files (`.mtl`, `.cdf`, `.chrparams`) to standard XML
+  - Automatic SOCPAK expansion (extracts nested ZIP archives inline)
+  - Automatic CryXML decoding during extraction
+  - Incremental extraction (skip unchanged files)
+  - Empty directory detection and re-extraction
+- **DataCore Database** - Full read/write support for `.dcb` game database files
+  - High-level Query API for searching records
+  - DOM-like Instance API for property access
+  - DataCoreBuilder for creating/modifying databases
+  - XML export with all properties resolved
+- **CryXmlB Read/Write** - Full round-trip support for binary XML files
+  - Parse `.mtl`, `.cdf`, `.chrparams`, `.adb`, `.animevents`, `.bspace`, `.xml`
+  - Convert to/from standard XML text
+  - Programmatic construction via builder API
 - **Character File Parsing** - Read and analyze `.chf` character head files
 - **DDS Mipmap Merging** - Merge split DDS texture files
 
