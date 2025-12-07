@@ -491,6 +491,22 @@ fn should_skip_file(output_path: &Path, expected_size: u64) -> bool {
     }
 }
 
+/// Check if a directory contains any files (recursively).
+/// Returns false for empty directories or directories containing only empty subdirectories.
+fn has_any_files(dir: &Path) -> bool {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                return true;
+            } else if path.is_dir() && has_any_files(&path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn cmd_p4k_extract(
     p4k_path: &PathBuf,
     output: &PathBuf,
@@ -592,28 +608,32 @@ fn cmd_p4k_extract(
         let should_extract = if let Some(ref dir) = socpak_dir {
             // Track all SOCPAK dirs for CryXML post-processing
             all_socpak_dirs.push(dir.clone());
-            // For SOCPAK, check if directory exists
+            // For SOCPAK, check if directory exists and contains files
             if dir.exists() {
-                // Directory exists - delete the .socpak file if it exists
-                if output_path.exists() {
-                    let _ = fs::remove_file(&output_path);
+                // Check if directory has any files (recursively)
+                // Empty dirs or dirs with only empty subdirs should be re-extracted
+                let has_files = has_any_files(dir);
+                if has_files {
+                    // Directory has actual files - skip extraction, delete .socpak if present
+                    if output_path.exists() {
+                        let _ = fs::remove_file(&output_path);
+                    }
+                    false
+                } else {
+                    // No files found - remove empty tree and re-extract
+                    let _ = fs::remove_dir_all(dir);
+                    true
                 }
-                false
             } else {
                 true
             }
         } else if incremental {
             let dominated = should_skip_file(&output_path, *size);
-            // Debug: print first few skip checks
-            if extracted.load(Ordering::Relaxed) + skipped.load(Ordering::Relaxed) < 5 {
-                eprintln!(
-                    "DEBUG: {} -> {} (size={}, exists={}, skip={})",
-                    name_normalized,
-                    output_path.display(),
-                    size,
-                    output_path.exists(),
-                    dominated
-                );
+            if dominated {
+                // File exists with matching size - but check if it's undecoded CryXML
+                if check_and_decode_cryxml(&output_path) {
+                    cryxml_decoded.fetch_add(1, Ordering::Relaxed);
+                }
             }
             !dominated
         } else {
@@ -673,8 +693,25 @@ fn cmd_p4k_extract(
                 }
             }
         } else {
-            // Write regular file
-            if let Err(e) = fs::write(&output_path, data) {
+            // Write regular file, decoding CryXML if applicable
+            let data_to_write = if is_cryxml_data(&data) {
+                // Decode CryXML to text XML
+                set_progress_message(&pb, Stage::CryXmlDecode, &name_normalized);
+                match CryXml::parse(&data) {
+                    Ok(cryxml) => match cryxml.to_xml_string() {
+                        Ok(xml) => {
+                            cryxml_decoded.fetch_add(1, Ordering::Relaxed);
+                            xml.into_bytes()
+                        }
+                        Err(_) => data, // Fall back to raw data
+                    },
+                    Err(_) => data, // Fall back to raw data
+                }
+            } else {
+                data
+            };
+
+            if let Err(e) = fs::write(&output_path, data_to_write) {
                 eprintln!("Failed to write {}: {}", name, e);
                 errors.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -704,12 +741,18 @@ fn cmd_p4k_extract(
         eprintln!("Warning: incremental mode enabled but no files were skipped - this may indicate a path mismatch");
     }
 
-    if socpak_expanded.load(Ordering::Relaxed) > 0 {
-        println!(
-            "Expanded {} files from SOCPAK archives ({} CryXML decoded)",
-            socpak_expanded.load(Ordering::Relaxed),
-            cryxml_decoded.load(Ordering::Relaxed)
-        );
+    let socpak_count = socpak_expanded.load(Ordering::Relaxed);
+    let cryxml_count = cryxml_decoded.load(Ordering::Relaxed);
+
+    if socpak_count > 0 || cryxml_count > 0 {
+        let mut parts = Vec::new();
+        if socpak_count > 0 {
+            parts.push(format!("{} files from SOCPAK archives", socpak_count));
+        }
+        if cryxml_count > 0 {
+            parts.push(format!("{} CryXML decoded", cryxml_count));
+        }
+        println!("{}", parts.join(", "));
     }
 
     // Process ALL SOCPAK directories for any undecoded CryXML files
