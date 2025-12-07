@@ -542,8 +542,8 @@ fn cmd_p4k_extract(
         println!("Found Data/Game.dcb - will extract and process DataCore");
     }
 
-    // Track skipped SOCPAK directories that may need CryXML processing
-    let mut skipped_socpak_dirs: Vec<PathBuf> = Vec::new();
+    // Track ALL SOCPAK directories for CryXML post-processing check
+    let mut all_socpak_dirs: Vec<PathBuf> = Vec::new();
 
     let pb = create_progress_bar(entries.len() as u64, Stage::P4kExtract);
 
@@ -576,10 +576,14 @@ fn cmd_p4k_extract(
         };
 
         let should_extract = if let Some(ref dir) = socpak_dir {
+            // Track all SOCPAK dirs for CryXML post-processing
+            all_socpak_dirs.push(dir.clone());
             // For SOCPAK, check if directory exists
             if dir.exists() {
-                // Track for CryXML post-processing
-                skipped_socpak_dirs.push(dir.clone());
+                // Directory exists - delete the .socpak file if it exists
+                if output_path.exists() {
+                    let _ = fs::remove_file(&output_path);
+                }
                 false
             } else {
                 true
@@ -641,6 +645,7 @@ fn cmd_p4k_extract(
                     socpak_expanded.fetch_add(result.files_extracted as u64, Ordering::Relaxed);
                     cryxml_decoded.fetch_add(result.cryxml_decoded as u64, Ordering::Relaxed);
                     extracted.fetch_add(1, Ordering::Relaxed);
+                    // Don't write the .socpak file - we've extracted it
                 }
                 Err(e) => {
                     eprintln!("Failed to extract SOCPAK {}: {}", name, e);
@@ -693,17 +698,17 @@ fn cmd_p4k_extract(
         );
     }
 
-    // Process skipped SOCPAK directories for undecoded CryXML files
-    if !skipped_socpak_dirs.is_empty() {
+    // Process ALL SOCPAK directories for any undecoded CryXML files
+    if !all_socpak_dirs.is_empty() {
         println!(
-            "\nChecking {} existing SOCPAK directories for undecoded CryXML files...",
-            skipped_socpak_dirs.len()
+            "\nVerifying CryXML decoding in {} SOCPAK directories...",
+            all_socpak_dirs.len()
         );
 
-        let cryxml_pb = create_progress_bar(skipped_socpak_dirs.len() as u64, Stage::CryXmlDecode);
+        let cryxml_pb = create_progress_bar(all_socpak_dirs.len() as u64, Stage::CryXmlDecode);
         let mut total_decoded = 0u64;
 
-        for dir in &skipped_socpak_dirs {
+        for dir in &all_socpak_dirs {
             let dir_name = dir.file_name().unwrap_or_default().to_string_lossy();
             set_progress_message(&cryxml_pb, Stage::CryXmlDecode, &dir_name);
 
@@ -719,12 +724,10 @@ fn cmd_p4k_extract(
             cryxml_pb.inc(1);
         }
 
-        cryxml_pb.finish_with_message("CryXML check complete");
+        cryxml_pb.finish_with_message("CryXML verification complete");
 
         if total_decoded > 0 {
-            println!("Decoded {} CryXML files in existing SOCPAK directories", total_decoded);
-        } else {
-            println!("All CryXML files already decoded");
+            println!("Decoded {} additional CryXML files", total_decoded);
         }
     }
 
