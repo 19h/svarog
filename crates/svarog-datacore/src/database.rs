@@ -21,43 +21,59 @@ use crate::{Error, Result};
 
 type FxHashMap<K, V> = FastHashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
-/// Zero-copy slice wrapper for value pools.
-/// Allows reading values directly from mmap without copying.
-#[derive(Clone)]
-struct ZeroCopySlice<'a, T: zerocopy::FromBytes> {
-    data: &'a [u8],
-    _marker: std::marker::PhantomData<T>,
+/// Pool counts for copying databases.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PoolCounts {
+    pub bool_count: usize,
+    pub int8_count: usize,
+    pub int16_count: usize,
+    pub int32_count: usize,
+    pub int64_count: usize,
+    pub uint8_count: usize,
+    pub uint16_count: usize,
+    pub uint32_count: usize,
+    pub uint64_count: usize,
+    pub float_count: usize,
+    pub double_count: usize,
+    pub guid_count: usize,
+    pub string_id_count: usize,
+    pub locale_count: usize,
+    pub enum_value_count: usize,
+    pub strong_count: usize,
+    pub weak_count: usize,
+    pub reference_count: usize,
+    pub enum_option_count: usize,
 }
 
-impl<'a, T: zerocopy::FromBytes> ZeroCopySlice<'a, T> {
-    #[inline]
-    fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    #[inline]
-    fn get(&self, index: usize) -> Option<T> {
-        let size = std::mem::size_of::<T>();
-        let offset = index * size;
-        if offset + size > self.data.len() {
-            return None;
-        }
-        T::read_from_bytes(&self.data[offset..offset + size]).ok()
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.data.len() / std::mem::size_of::<T>()
-    }
+/// Pool type identifier for raw data access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolType {
+    Bool,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float,
+    Double,
+    Guid,
+    StringId,
+    Locale,
+    EnumValue,
+    Strong,
+    Weak,
+    Reference,
+    EnumOption,
 }
 
 /// Optimized DataCore database with zero-copy access.
 ///
 /// This implementation uses memory-mapped I/O and zero-copy slices
 /// to minimize allocations and maximize cache efficiency.
+#[allow(dead_code)]
 pub struct DataCoreDatabase {
     /// Memory-mapped file (if loaded from file)
     _mmap: Option<Mmap>,
@@ -408,6 +424,11 @@ impl DataCoreDatabase {
     }
 
     #[inline]
+    pub fn data_mappings(&self) -> &[DataCoreDataMapping] {
+        &self.data_mappings
+    }
+
+    #[inline]
     pub fn records(&self) -> &[DataCoreRecord] {
         &self.records
     }
@@ -721,6 +742,82 @@ impl DataCoreDatabase {
         }
 
         Ok(result)
+    }
+
+    // Raw data access for builder (to copy pools without re-parsing)
+
+    /// Get the raw string table 1 data (file names, content strings).
+    pub fn raw_string_table_1(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(self.string_table_1_offset),
+                self.string_table_1_len,
+            )
+        }
+    }
+
+    /// Get the raw string table 2 data (type names, property names, record names).
+    pub fn raw_string_table_2(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(self.string_table_2_offset),
+                self.string_table_2_len,
+            )
+        }
+    }
+
+    /// Get raw pool counts for copying.
+    pub fn pool_counts(&self) -> PoolCounts {
+        PoolCounts {
+            bool_count: self.bool_count,
+            int8_count: self.int8_count,
+            int16_count: self.int16_count,
+            int32_count: self.int32_count,
+            int64_count: self.int64_count,
+            uint8_count: self.uint8_count,
+            uint16_count: self.uint16_count,
+            uint32_count: self.uint32_count,
+            uint64_count: self.uint64_count,
+            float_count: self.float_count,
+            double_count: self.double_count,
+            guid_count: self.guid_count,
+            string_id_count: self.string_id_count,
+            locale_count: self.locale_count,
+            enum_value_count: self.enum_value_count,
+            strong_count: self.strong_count,
+            weak_count: self.weak_count,
+            reference_count: self.reference_count,
+            enum_option_count: self.enum_option_count,
+        }
+    }
+
+    /// Get raw pool data for a specific pool type.
+    pub fn raw_pool_data(&self, pool_type: PoolType) -> &[u8] {
+        let (offset, count, elem_size) = match pool_type {
+            PoolType::Bool => (self.bool_offset, self.bool_count, 1),
+            PoolType::Int8 => (self.int8_offset, self.int8_count, 1),
+            PoolType::Int16 => (self.int16_offset, self.int16_count, 2),
+            PoolType::Int32 => (self.int32_offset, self.int32_count, 4),
+            PoolType::Int64 => (self.int64_offset, self.int64_count, 8),
+            PoolType::UInt8 => (self.uint8_offset, self.uint8_count, 1),
+            PoolType::UInt16 => (self.uint16_offset, self.uint16_count, 2),
+            PoolType::UInt32 => (self.uint32_offset, self.uint32_count, 4),
+            PoolType::UInt64 => (self.uint64_offset, self.uint64_count, 8),
+            PoolType::Float => (self.float_offset, self.float_count, 4),
+            PoolType::Double => (self.double_offset, self.double_count, 8),
+            PoolType::Guid => (self.guid_offset, self.guid_count, 16),
+            PoolType::StringId => (self.string_id_offset, self.string_id_count, 4),
+            PoolType::Locale => (self.locale_offset, self.locale_count, 4),
+            PoolType::EnumValue => (self.enum_value_offset, self.enum_value_count, 4),
+            PoolType::Strong => (self.strong_offset, self.strong_count, 8),
+            PoolType::Weak => (self.weak_offset, self.weak_count, 8),
+            PoolType::Reference => (self.reference_offset, self.reference_count, 20),
+            PoolType::EnumOption => (self.enum_option_offset, self.enum_option_count, 4),
+        };
+
+        unsafe {
+            std::slice::from_raw_parts(self.data.add(offset), count * elem_size)
+        }
     }
 
     fn build_string_cache_fast(data: &[u8], arena: &Bump) -> FxHashMap<i32, *const str> {

@@ -39,6 +39,34 @@ impl CigGuid {
         Self { bytes }
     }
 
+    /// Generate a random GUID.
+    ///
+    /// Uses a simple linear congruential generator seeded from system time.
+    /// This is suitable for generating unique IDs but not for cryptographic purposes.
+    #[inline]
+    pub fn random() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Simple LCG seeded from current time and a counter
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let time_seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut state = time_seed.wrapping_add(counter).wrapping_mul(6364136223846793005);
+
+        let mut bytes = [0u8; 16];
+        for chunk in bytes.chunks_exact_mut(8) {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            chunk.copy_from_slice(&state.to_le_bytes());
+        }
+
+        Self { bytes }
+    }
+
     /// Get the raw bytes of the GUID.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; 16] {

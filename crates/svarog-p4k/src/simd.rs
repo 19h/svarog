@@ -235,6 +235,7 @@ pub fn find_eocd_signature(data: &[u8], search_start: usize, search_end: usize) 
 }
 
 /// Search for the EOCD64 locator signature (0x07064b50).
+#[allow(dead_code)]
 #[inline]
 pub fn find_eocd64_locator_signature(
     data: &[u8],
