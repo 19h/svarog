@@ -1,0 +1,42 @@
+[package]
+name = "svarog-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "GUI application for Star Citizen game file extraction and analysis"
+
+[[bin]]
+name = "svarog-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+svarog.workspace = true
+
+# GUI framework
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] }
+egui_extras = { version = "0.29", features = ["all_loaders", "image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+
+# File dialogs
+rfd = "0.15"
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Async/threading
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+
+# Utilities
+memmap2.workspace = true
+glob.workspace = true
+regex = "1"

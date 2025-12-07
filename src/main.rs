@@ -131,7 +131,7 @@ enum Commands {
         #[arg(long, default_value = "true")]
         incremental: bool,
 
-        /// Extract and process DataCore (Game.dcb) to XML
+        /// Extract and process DataCore (Game.dcb or Game2.dcb) to XML
         #[arg(long, default_value = "true")]
         extract_dcb: bool,
 
@@ -556,20 +556,23 @@ fn cmd_p4k_extract(
 
     println!("Extracting {} entries from P4K...", entries.len());
 
-    // Find DCB entry if extraction is requested
-    let dcb_entry = if extract_dcb {
-        archive.find("Data\\Game.dcb").map(|e| {
-            (
-                archive.iter().position(|x| x.name == e.name).unwrap(),
-                e.name.to_string(),
-            )
-        })
+    // Find all DCB entries if extraction is requested
+    let dcb_entries: Vec<(usize, String)> = if extract_dcb {
+        archive
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.name.to_lowercase().ends_with(".dcb"))
+            .map(|(i, e)| (i, e.name.to_string()))
+            .collect()
     } else {
-        None
+        Vec::new()
     };
 
-    if dcb_entry.is_some() {
-        println!("Found Data/Game.dcb - will extract and process DataCore");
+    if !dcb_entries.is_empty() {
+        println!(
+            "Found {} DCB file(s) - will extract and process DataCore",
+            dcb_entries.len()
+        );
     }
 
     // Track ALL SOCPAK directories for CryXML post-processing check
@@ -788,16 +791,26 @@ fn cmd_p4k_extract(
         }
     }
 
-    // Extract and process DCB if requested
-    if let Some((dcb_idx, dcb_name)) = dcb_entry {
+    // Extract and process all DCB files
+    for (dcb_idx, dcb_name) in &dcb_entries {
         println!("\nProcessing DataCore: {}", dcb_name);
 
         let dcb_start = Instant::now();
-        let dcb_data = archive.read_index(dcb_idx)
-            .context("Failed to read Game.dcb from archive")?;
+        let dcb_data = match archive.read_index(*dcb_idx) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", dcb_name, e);
+                continue;
+            }
+        };
 
-        let database = DataCoreDatabase::parse(&dcb_data)
-            .context("Failed to parse DataCore")?;
+        let database = match DataCoreDatabase::parse(&dcb_data) {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("Failed to parse {}: {}", dcb_name, e);
+                continue;
+            }
+        };
 
         println!(
             "Loaded DataCore in {:?}: {} structs, {} enums, {} records",
@@ -807,59 +820,88 @@ fn cmd_p4k_extract(
             database.records().len()
         );
 
-        // Export to XML
+        // Export to XML (with incremental support)
         let main_records: Vec<_> = database.main_records().collect();
-        println!("Exporting {} DataCore records...", main_records.len());
 
-        let dcb_pb = create_progress_bar(main_records.len() as u64, Stage::DcbExport);
+        // In incremental mode, filter out records that already have XML files
+        let records_to_export: Vec<_> = if incremental {
+            main_records
+                .iter()
+                .filter(|record| {
+                    let file_name = database.record_file_name(record).unwrap_or("unknown.xml");
+                    let output_path = path_mapper.resolve(output, file_name);
+                    let output_path = output_path.with_extension("xml");
+                    !output_path.exists()
+                })
+                .collect()
+        } else {
+            main_records.iter().collect()
+        };
 
-        let exporter = svarog::XmlExporter::new(&database);
-        let mut dcb_exported = 0;
-        let mut dcb_errors = 0;
-
-        for record in &main_records {
-            let file_name = database
-                .record_file_name(record)
-                .unwrap_or("unknown.xml");
-
-            // Update progress with current file
-            set_progress_message(&dcb_pb, Stage::DcbExport, file_name);
-
-            // Use path mapper to merge with existing case
-            let output_path = path_mapper.resolve(output, file_name);
-            let output_path = output_path.with_extension("xml");
-
-            // Create parent directories
-            if let Some(parent) = output_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-
-            // Export record
-            match exporter.export_record(record) {
-                Ok(xml) => {
-                    if let Err(e) = fs::write(&output_path, xml) {
-                        eprintln!("Failed to write {}: {}", file_name, e);
-                        dcb_errors += 1;
-                    } else {
-                        dcb_exported += 1;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error exporting {}: {}", file_name, e);
-                    dcb_errors += 1;
-                }
-            }
-
-            dcb_pb.inc(1);
+        let skipped_dcb = main_records.len() - records_to_export.len();
+        if skipped_dcb > 0 {
+            println!(
+                "Exporting {} DataCore records ({} already exist, skipped)...",
+                records_to_export.len(),
+                skipped_dcb
+            );
+        } else {
+            println!("Exporting {} DataCore records...", records_to_export.len());
         }
 
-        dcb_pb.finish_with_message("DCB export complete");
-        println!(
-            "Exported {} DataCore records ({} errors) in {:?}",
-            dcb_exported,
-            dcb_errors,
-            dcb_start.elapsed()
-        );
+        if records_to_export.is_empty() {
+            println!("All DataCore records already exported, nothing to do");
+        } else {
+            let dcb_pb = create_progress_bar(records_to_export.len() as u64, Stage::DcbExport);
+
+            let exporter = svarog::XmlExporter::new(&database);
+            let mut dcb_exported = 0;
+            let mut dcb_errors = 0;
+
+            for record in &records_to_export {
+                let file_name = database
+                    .record_file_name(record)
+                    .unwrap_or("unknown.xml");
+
+                // Update progress with current file
+                set_progress_message(&dcb_pb, Stage::DcbExport, file_name);
+
+                // Use path mapper to merge with existing case
+                let output_path = path_mapper.resolve(output, file_name);
+                let output_path = output_path.with_extension("xml");
+
+                // Create parent directories
+                if let Some(parent) = output_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                // Export record
+                match exporter.export_record(record) {
+                    Ok(xml) => {
+                        if let Err(e) = fs::write(&output_path, xml) {
+                            eprintln!("Failed to write {}: {}", file_name, e);
+                            dcb_errors += 1;
+                        } else {
+                            dcb_exported += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error exporting {}: {}", file_name, e);
+                        dcb_errors += 1;
+                    }
+                }
+
+                dcb_pb.inc(1);
+            }
+
+            dcb_pb.finish_with_message("DCB export complete");
+            println!(
+                "Exported {} DataCore records ({} errors) in {:?}",
+                dcb_exported,
+                dcb_errors,
+                dcb_start.elapsed()
+            );
+        }
     }
 
     Ok(())

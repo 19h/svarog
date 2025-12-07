@@ -8,6 +8,7 @@ members = [
     "crates/svarog-chf",
     "crates/svarog-dds",
     "crates/svarog",
+    "crates/svarog-gui",
 ]
 
 [workspace.package]
@@ -75,6 +76,9 @@ memchr = "2.7"
 
 # ZIP (for socpak)
 zip = { version = "2.2", default-features = false, features = ["deflate", "zstd"] }
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 
 [package]
 name = "svarog-cli"
