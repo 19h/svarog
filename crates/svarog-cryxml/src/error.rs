@@ -1,8 +1,8 @@
-//! Error types for CryXmlB parsing.
+//! Error types for CryXmlB parsing and writing.
 
 use thiserror::Error;
 
-/// Errors that can occur when parsing CryXmlB files.
+/// Errors that can occur when parsing or writing CryXmlB files.
 #[derive(Debug, Error)]
 pub enum Error {
     /// I/O error.
@@ -29,8 +29,7 @@ pub enum Error {
     #[error("UTF-8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
 
-    /// XML writing error.
-    #[cfg(feature = "xml-output")]
+    /// XML parsing or writing error.
     #[error("XML error: {0}")]
     Xml(String),
 }

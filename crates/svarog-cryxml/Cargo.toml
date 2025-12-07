@@ -13,10 +13,10 @@ svarog-common.workspace = true
 byteorder.workspace = true
 zerocopy.workspace = true
 thiserror.workspace = true
-quick-xml = { workspace = true, optional = true }
+quick-xml.workspace = true
 
 [features]
 default = ["xml-output"]
-xml-output = ["quick-xml"]
+xml-output = []
 
 [dev-dependencies]

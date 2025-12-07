@@ -203,7 +203,7 @@ impl CryXml {
         writer: &mut quick_xml::Writer<W>,
         root_node: &CryXmlNode,
     ) -> Result<()> {
-        use quick_xml::events::{BytesEnd, BytesStart, Event};
+        use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 
         // Stack items for iterative traversal - use u32 offset instead of String to save memory
         enum StackItem<'a> {
@@ -221,6 +221,10 @@ impl CryXml {
                 StackItem::WriteStart(node) => {
                     let tag_name = self.get_string(node.tag_string_offset)?;
 
+                    // Check for text content
+                    let content = self.get_string(node.content_string_offset)?;
+                    let has_content = !content.is_empty();
+
                     // Create start element
                     let mut elem = BytesStart::new(tag_name);
 
@@ -237,10 +241,22 @@ impl CryXml {
                         elem.push_attribute((key, value));
                     }
 
-                    if node.child_count == 0 {
-                        // Self-closing element
+                    let child_count = node.child_count;
+                    if child_count == 0 && !has_content {
+                        // Self-closing element with no content
                         writer
                             .write_event(Event::Empty(elem))
+                            .map_err(|e| Error::Xml(e.to_string()))?;
+                    } else if child_count == 0 && has_content {
+                        // Element with text content only: <tag>content</tag>
+                        writer
+                            .write_event(Event::Start(elem))
+                            .map_err(|e| Error::Xml(e.to_string()))?;
+                        writer
+                            .write_event(Event::Text(BytesText::new(content)))
+                            .map_err(|e| Error::Xml(e.to_string()))?;
+                        writer
+                            .write_event(Event::End(BytesEnd::new(tag_name)))
                             .map_err(|e| Error::Xml(e.to_string()))?;
                     } else {
                         // Element with children - write start tag
@@ -252,8 +268,9 @@ impl CryXml {
                         stack.push(StackItem::WriteEnd(node.tag_string_offset));
 
                         // Push children in reverse order so they're processed in correct order
-                        let start = node.first_child_index as usize;
-                        let end = start + node.child_count as usize;
+                        let first_child = node.first_child_index;
+                        let start = first_child as usize;
+                        let end = start + child_count as usize;
                         for &child_idx in self.child_indices[start..end].iter().rev() {
                             if let Some(child) = self.nodes.get(child_idx as usize) {
                                 stack.push(StackItem::WriteStart(child));

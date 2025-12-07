@@ -1,7 +1,8 @@
-//! CryXmlB binary XML parser for Star Citizen files.
+//! CryXmlB binary XML parser and writer for Star Citizen files.
 //!
 //! Many Star Citizen configuration files use a binary XML format called CryXmlB.
-//! This crate parses these files and can convert them to standard XML.
+//! This crate parses these files, converts them to standard XML, and can also
+//! write CryXmlB files from XML or programmatic construction.
 //!
 //! # Supported File Types
 //!
@@ -13,7 +14,7 @@
 //! - `.chrparams` - Character parameters
 //! - Some `.xml` files (the binary variant)
 //!
-//! # Example
+//! # Reading CryXmlB
 //!
 //! ```no_run
 //! use svarog_cryxml::CryXml;
@@ -27,12 +28,49 @@
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! # Writing CryXmlB from XML
+//!
+//! ```no_run
+//! use svarog_cryxml::builder::CryXmlBuilder;
+//!
+//! let xml = r#"<Material Name="MyMaterial">
+//!     <Textures>
+//!         <Texture Map="Diffuse" File="texture.dds"/>
+//!     </Textures>
+//! </Material>"#;
+//!
+//! let builder = CryXmlBuilder::from_xml(xml)?;
+//! let cryxml_bytes = builder.build()?;
+//! std::fs::write("material.mtl", cryxml_bytes)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! # Writing CryXmlB Programmatically
+//!
+//! ```no_run
+//! use svarog_cryxml::builder::{CryXmlBuilder, BuilderNode};
+//!
+//! let root = BuilderNode::new("Material")
+//!     .attr("Name", "MyMaterial")
+//!     .child(BuilderNode::new("Textures")
+//!         .child(BuilderNode::new("Texture")
+//!             .attr("Map", "Diffuse")
+//!             .attr("File", "texture.dds")));
+//!
+//! let builder = CryXmlBuilder::new(root);
+//! let cryxml_bytes = builder.build()?;
+//! std::fs::write("material.mtl", cryxml_bytes)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 mod error;
 mod header;
 mod node;
 mod attribute;
 mod parser;
+pub mod builder;
+mod from_xml;
 
 pub use error::{Error, Result};
 pub use header::CryXmlHeader;

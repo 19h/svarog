@@ -170,6 +170,17 @@ enum Commands {
         output: PathBuf,
     },
 
+    /// Convert an XML file to CryXmlB binary format
+    CryxmlCreate {
+        /// Input XML file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output CryXmlB file
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
     /// Extract DataCore database to XML/JSON files
     DcbExtract {
         /// Path to the DCB file or P4K containing it
@@ -238,6 +249,9 @@ fn main() -> Result<()> {
         }
         Commands::CryxmlConvert { input, output } => {
             cmd_cryxml_convert(&input, &output)?;
+        }
+        Commands::CryxmlCreate { input, output } => {
+            cmd_cryxml_create(&input, &output)?;
         }
         Commands::DcbExtract { input, output, filter } => {
             cmd_dcb_extract(&input, &output, filter.as_deref())?;
@@ -839,7 +853,7 @@ fn cmd_p4k_list(p4k_path: &PathBuf, filter: Option<&str>, detailed: bool) -> Res
 }
 
 fn cmd_cryxml_convert(input: &PathBuf, output: &PathBuf) -> Result<()> {
-    println!("Converting: {} -> {}", input.display(), output.display());
+    println!("Converting CryXmlB to XML: {} -> {}", input.display(), output.display());
 
     let data = fs::read(input).context("Failed to read input file")?;
 
@@ -852,6 +866,22 @@ fn cmd_cryxml_convert(input: &PathBuf, output: &PathBuf) -> Result<()> {
     fs::write(output, xml).context("Failed to write output file")?;
 
     println!("Conversion complete");
+
+    Ok(())
+}
+
+fn cmd_cryxml_create(input: &PathBuf, output: &PathBuf) -> Result<()> {
+    use svarog::cryxml::builder::CryXmlBuilder;
+
+    println!("Converting XML to CryXmlB: {} -> {}", input.display(), output.display());
+
+    let xml = fs::read_to_string(input).context("Failed to read input file")?;
+
+    let builder = CryXmlBuilder::from_xml(&xml).context("Failed to parse XML")?;
+    let cryxml_bytes = builder.build().context("Failed to build CryXmlB")?;
+    fs::write(output, cryxml_bytes).context("Failed to write output file")?;
+
+    println!("Conversion complete ({} bytes)", fs::metadata(output)?.len());
 
     Ok(())
 }
