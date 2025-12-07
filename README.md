@@ -60,7 +60,7 @@ All SIMD features are **runtime-detected** on x86_64, ensuring optimal performan
 
 ```bash
 # Clone the repository
-git clone https://github.com/diogotr7/Svarog.git
+git clone https://github.com/19h/Svarog.git
 cd Svarog
 
 # Build release version with all optimizations
