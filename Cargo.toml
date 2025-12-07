@@ -73,6 +73,9 @@ rustc-hash = "2.1"
 wide = "0.7"
 memchr = "2.7"
 
+# ZIP (for socpak)
+zip = { version = "2.2", default-features = false, features = ["deflate", "zstd"] }
+
 [package]
 name = "svarog-cli"
 version.workspace = true
@@ -93,6 +96,9 @@ clap.workspace = true
 indicatif.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
+zip.workspace = true
+walkdir = "2.5"
+regex = "1"
 
 [profile.release]
 lto = true
