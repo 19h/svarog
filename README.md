@@ -21,6 +21,44 @@ A high-performance Rust library and CLI for extracting and parsing Star Citizen 
 - **Character File Parsing** - Read and analyze `.chf` character head files
 - **DDS Mipmap Merging** - Merge split DDS texture files
 
+## GUI Application
+
+Svarog includes a graphical interface for browsing P4K archives and DataCore databases.
+
+| P4K Browser | DataCore Browser |
+|:-----------:|:----------------:|
+| <img width=100% alt="P4K Browser" src="https://github.com/user-attachments/assets/c7931874-f320-422a-a486-a3d9f4af05df" /> | <img width=100% alt="DataCore Browser" src="https://github.com/user-attachments/assets/67b18a53-ceb2-4f2e-b870-a6e6b1c2033a" /> |
+
+### Download
+
+Pre-built binaries are available in [Releases](https://github.com/19h/svarog/releases) for:
+
+| Platform | Architectures |
+|----------|---------------|
+| Linux | x86_64 |
+| macOS | x86_64 (Intel), ARM64 (Apple Silicon) |
+| Windows | x86_64, ARM64 |
+
+> **Note:** Linux ARM64 builds include only the CLI due to cross-compilation constraints.
+
+### GUI Features
+
+**P4K Browser**
+- Browse and search P4K archive contents with a file tree
+- Preview files directly: text, XML (with syntax highlighting), hex view
+- Automatic CryXML decoding for binary XML files
+- Extract individual files or entire directories
+
+**DataCore Browser**
+- Browse all records organized by type hierarchy
+- Search records by name with real-time filtering
+- Filter by record type (click type badges to filter)
+- XML content viewer with line numbers and syntax highlighting
+- **Reference Navigation**: Click references to jump between related records
+- **Incoming References**: See which records reference the current one
+- **Outgoing References**: See which records the current one references
+- Navigation history with back/forward buttons
+
 ## Performance
 
 Svarog is heavily optimized for maximum throughput with cross-platform SIMD acceleration:
