@@ -263,7 +263,7 @@ impl DataCoreBrowserPanel {
                                             ui.label(RichText::new("Select a record to view its contents").color(Color32::from_gray(100)));
                                         });
                                     } else {
-                                        render_text_with_line_numbers(ui, &state.record_xml, "dcb_xml_scroll", &mut state.selected_line, true);
+                                        render_text_with_line_numbers(ui, &state.record_xml, "dcb_xml_scroll");
                                     }
                                 });
 
@@ -294,7 +294,7 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.incoming_references.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(25) } else { Color32::from_gray(26) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     let (badge, color) = match ref_info.ref_type {
@@ -347,7 +347,7 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.record_references.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(25) } else { Color32::from_gray(26) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     let (badge, color) = match ref_info.ref_type {
@@ -501,8 +501,7 @@ impl DataCoreBrowserPanel {
                                             );
                                         });
                                     } else {
-                                        let mut dummy_selected: Option<usize> = None;
-                                        render_text_with_line_numbers(ui, &state.type_preview, "dcb_type_preview_scroll", &mut dummy_selected, false);
+                                        render_text_with_line_numbers(ui, &state.type_preview, "dcb_type_preview_scroll");
                                     }
                                 });
 
@@ -533,7 +532,7 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.struct_incoming_refs.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(25) } else { Color32::from_gray(26) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
@@ -594,7 +593,7 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.struct_outgoing_refs.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(25) } else { Color32::from_gray(26) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     let (badge, badge_color, target_name, target_idx) = match &ref_info.target_type {
@@ -674,33 +673,25 @@ impl DataCoreBrowserPanel {
                             .show(&mut columns[0], |ui| {
                                 if let Some(db) = &state.datacore {
                                     let search = state.datacore_search.to_lowercase();
-                                    let mut row = 0usize;
                                     for (idx, _def) in db.enum_definitions().iter().enumerate() {
                                         let name = db.enum_name(idx).unwrap_or("Unknown");
                                         if !search.is_empty() && !name.to_lowercase().contains(&search) {
                                             continue;
                                         }
                                         let is_selected = state.selected_enum == Some(idx);
-                                        let bg = if row % 2 == 0 { Color32::TRANSPARENT } else { Color32::from_rgba_unmultiplied(255, 255, 255, 3) };
-                                        row += 1;
 
-                                        egui::Frame::none()
-                                            .fill(bg)
-                                            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-                                            .show(ui, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.add_space(16.0);
-                                                    ui.label(RichText::new("[E]").color(Color32::from_rgb(220, 180, 120)).small().monospace());
-                                                    let text = RichText::new(name)
-                                                        .monospace()
-                                                        .color(if is_selected { Color32::from_rgb(100, 180, 255) } else { Color32::from_gray(200) });
-                                                    let resp = ui.add(egui::Label::new(text).sense(Sense::click()).truncate())
-                                                        .on_hover_cursor(CursorIcon::Default);
-                                                    if resp.clicked() {
-                                                        clicked_enum = Some(idx);
-                                                    }
-                                                });
-                                            });
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(16.0);
+                                            ui.label(RichText::new("[E]").color(Color32::from_rgb(220, 180, 120)).small().monospace());
+                                            let text = RichText::new(name)
+                                                .monospace()
+                                                .color(if is_selected { Color32::from_rgb(100, 180, 255) } else { Color32::from_gray(200) });
+                                            let resp = ui.add(egui::Label::new(text).sense(Sense::click()).truncate())
+                                                .on_hover_cursor(CursorIcon::Default);
+                                            if resp.clicked() {
+                                                clicked_enum = Some(idx);
+                                            }
+                                        });
                                     }
                                 }
                             });
@@ -742,8 +733,7 @@ impl DataCoreBrowserPanel {
                                             );
                                         });
                                     } else {
-                                        let mut dummy_selected: Option<usize> = None;
-                                        render_text_with_line_numbers(ui, &state.enum_preview, "dcb_enum_preview_scroll", &mut dummy_selected, false);
+                                        render_text_with_line_numbers(ui, &state.enum_preview, "dcb_enum_preview_scroll");
                                     }
                                 });
 
@@ -769,7 +759,7 @@ impl DataCoreBrowserPanel {
                                                 .auto_shrink([false, false])
                                                 .show(ui, |ui| {
                                                     for (i, ref_info) in state.enum_incoming_refs.iter().enumerate() {
-                                                        let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
+                                                        let bg = if i % 2 == 0 { Color32::from_gray(25) } else { Color32::from_gray(26) };
                                                         egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                             ui.horizontal(|ui| {
                                                                 ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
@@ -992,88 +982,59 @@ fn generate_enum_preview(db: &svarog::datacore::DataCoreDatabase, enum_index: us
     exporter.generate_enum_preview(enum_index)
 }
 
-/// Render text content with line numbers and consistent styling
-fn render_text_with_line_numbers(ui: &mut Ui, text: &str, scroll_id: &str, selected_line: &mut Option<usize>, selectable: bool) {
-    let lines: Vec<&str> = text.lines().collect();
-    let line_count = lines.len();
-    let num_digits = format!("{}", line_count).len().max(3);
-    let font_size = 11.0;
-    let line_num_width = num_digits as f32 * 6.5 + 10.0;
-    let row_height = 15.0;
+/// Render text content with line numbers and text selection support
+fn render_text_with_line_numbers(ui: &mut Ui, text: &str, scroll_id: &str) {
+    let text = text.trim_end();
+    let line_count = text.lines().count();
+    let num_width = format!("{}", line_count).len().max(2);
+    let line_num_col_width = (num_width as f32 + 1.0) * 8.0;
 
-    ScrollArea::vertical()
+    ScrollArea::both()
         .id_salt(scroll_id)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let available_width = ui.available_width();
+            ui.horizontal_top(|ui| {
+                // Reserve space for line numbers column
+                let line_num_x = ui.cursor().min.x + line_num_col_width - 4.0;
+                ui.add_space(line_num_col_width + 12.0);
 
-            for (i, line) in lines.iter().enumerate() {
-                let line_num = i + 1;
-                let is_selected = selectable && *selected_line == Some(i);
+                // Text content (selectable)
+                let mut text_copy = text.to_owned();
+                let output = egui::TextEdit::multiline(&mut text_copy)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .interactive(true)
+                    .frame(false)
+                    .text_color(Color32::from_gray(200))
+                    .show(ui);
 
-                // Background color for the entire row (very subtle alternating)
-                let bg_color = if is_selected {
-                    Color32::from_rgba_unmultiplied(100, 180, 255, 40)
-                } else if i % 2 == 1 {
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 3)
-                } else {
-                    Color32::TRANSPARENT
-                };
+                // Use galley_pos - the exact screen position where galley is drawn
+                let galley_pos = output.galley_pos;
+                let galley = &output.galley;
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
 
-                // Allocate the full row
-                let sense = if selectable { Sense::click() } else { Sense::hover() };
-                let (row_rect, row_response) = ui.allocate_exact_size(
-                    egui::vec2(available_width, row_height),
-                    sense
-                );
+                for (i, row) in galley.rows.iter().enumerate() {
+                    if i >= line_count {
+                        break;
+                    }
+                    let row_y = galley_pos.y + row.rect.center().y;
 
-                // Draw row background
-                ui.painter().rect_filled(row_rect, 0.0, bg_color);
-
-                // Line number
-                let line_num_color = if is_selected {
-                    Color32::from_rgb(100, 180, 255)
-                } else {
-                    Color32::from_gray(80)
-                };
-
-                ui.painter().text(
-                    egui::pos2(row_rect.left() + 4.0, row_rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{:>width$}", line_num, width = num_digits),
-                    egui::FontId::monospace(font_size),
-                    line_num_color,
-                );
-
-                // Separator line (draw once per row at the line number boundary)
-                let sep_x = row_rect.left() + line_num_width;
-                ui.painter().line_segment(
-                    [egui::pos2(sep_x, row_rect.top()), egui::pos2(sep_x, row_rect.bottom())],
-                    egui::Stroke::new(1.0, Color32::from_gray(40)),
-                );
-
-                // Content text - clipped to available width
-                let text_start_x = sep_x + 6.0;
-                let text_color = Color32::from_gray(200);
-
-                // Create a clip rect to prevent text overflow
-                let text_clip_rect = egui::Rect::from_min_max(
-                    egui::pos2(text_start_x, row_rect.top()),
-                    egui::pos2(row_rect.right() - 4.0, row_rect.bottom()),
-                );
-
-                ui.painter().with_clip_rect(text_clip_rect).text(
-                    egui::pos2(text_start_x, row_rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    *line,
-                    egui::FontId::monospace(font_size),
-                    text_color,
-                );
-
-                if selectable && row_response.clicked() {
-                    *selected_line = Some(i);
+                    ui.painter().text(
+                        egui::pos2(line_num_x, row_y),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{}", i + 1),
+                        font_id.clone(),
+                        Color32::from_gray(80),
+                    );
                 }
-            }
+
+                // Separator line
+                ui.painter().vline(
+                    line_num_x + 8.0,
+                    galley_pos.y..=galley_pos.y + galley.rect.height(),
+                    egui::Stroke::new(1.0, Color32::from_gray(50))
+                );
+            });
         });
 }
 
@@ -1125,76 +1086,66 @@ fn render_type_tree(
     let is_selected = node.struct_index.is_some()
         && selected.map_or(false, |idx| Some(idx) == node.struct_index);
 
-    let row_bg = if *row_index % 2 == 0 {
-        Color32::TRANSPARENT
-    } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 3)
-    };
     *row_index += 1;
 
-    egui::Frame::none()
-        .fill(row_bg)
-        .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let indent = depth as f32 * 32.0;
-                if depth > 0 {
-                    let rect = ui.available_rect_before_wrap();
-                    for d in 0..depth {
-                        let x = rect.left() + (d as f32 * 32.0) + 8.0;
-                        ui.painter().line_segment(
-                            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                            egui::Stroke::new(1.0, Color32::from_gray(60)),
-                        );
-                    }
-                }
-                ui.add_space(indent);
+    ui.horizontal(|ui| {
+        let indent = depth as f32 * 32.0;
+        if depth > 0 {
+            let rect = ui.available_rect_before_wrap();
+            for d in 0..depth {
+                let x = rect.left() + (d as f32 * 32.0) + 8.0;
+                ui.painter().line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    egui::Stroke::new(1.0, Color32::from_gray(60)),
+                );
+            }
+        }
+        ui.add_space(indent);
 
-                // Expand/collapse triangle
-                let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-                response = response.on_hover_cursor(CursorIcon::Default);
-                if response.clicked() && !node.children.is_empty() {
-                    node.expanded = !node.expanded;
-                }
-                let center = rect.center();
-                let size = 5.0;
-                let color = if response.hovered() {
-                    Color32::WHITE
-                } else {
-                    Color32::from_gray(180)
-                };
-                if !node.children.is_empty() {
-                    if node.expanded {
-                        let points = vec![
-                            egui::pos2(center.x - size, center.y - size * 0.5),
-                            egui::pos2(center.x + size, center.y - size * 0.5),
-                            egui::pos2(center.x, center.y + size * 0.5),
-                        ];
-                        ui.painter().add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
-                    } else {
-                        let points = vec![
-                            egui::pos2(center.x - size * 0.5, center.y - size),
-                            egui::pos2(center.x + size * 0.5, center.y),
-                            egui::pos2(center.x - size * 0.5, center.y + size),
-                        ];
-                        ui.painter().add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
-                    }
-                }
+        // Expand/collapse triangle
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
+        response = response.on_hover_cursor(CursorIcon::Default);
+        if response.clicked() && !node.children.is_empty() {
+            node.expanded = !node.expanded;
+        }
+        let center = rect.center();
+        let size = 5.0;
+        let color = if response.hovered() {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(180)
+        };
+        if !node.children.is_empty() {
+            if node.expanded {
+                let points = vec![
+                    egui::pos2(center.x - size, center.y - size * 0.5),
+                    egui::pos2(center.x + size, center.y - size * 0.5),
+                    egui::pos2(center.x, center.y + size * 0.5),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+            } else {
+                let points = vec![
+                    egui::pos2(center.x - size * 0.5, center.y - size),
+                    egui::pos2(center.x + size * 0.5, center.y),
+                    egui::pos2(center.x - size * 0.5, center.y + size),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+            }
+        }
 
-                ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
+        ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
 
-                let label_text = RichText::new(&node.name)
-                    .monospace()
-                    .color(if is_selected { Color32::from_rgb(100, 180, 255) } else { Color32::from_gray(200) });
-                let resp = ui.add(egui::Label::new(label_text).sense(Sense::click()).truncate())
-                    .on_hover_cursor(CursorIcon::Default);
-                if resp.clicked() {
-                    if let Some(idx) = node.struct_index {
-                        *clicked_struct = Some(idx);
-                    }
-                }
-            });
-        });
+        let label_text = RichText::new(&node.name)
+            .monospace()
+            .color(if is_selected { Color32::from_rgb(100, 180, 255) } else { Color32::from_gray(200) });
+        let resp = ui.add(egui::Label::new(label_text).sense(Sense::click()).truncate())
+            .on_hover_cursor(CursorIcon::Default);
+        if resp.clicked() {
+            if let Some(idx) = node.struct_index {
+                *clicked_struct = Some(idx);
+            }
+        }
+    });
 
     if node.expanded {
         for child in &mut node.children {
@@ -1639,18 +1590,9 @@ fn render_record_tree(
         && node.record_index.is_some()
         && selected.as_ref().map_or(false, |s| Some(*s) == node.record_index);
 
-    let row_bg = if *row_index % 2 == 0 {
-        Color32::TRANSPARENT
-    } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 1)  // 75% less opaque
-    };
     *row_index += 1;
 
-    egui::Frame::none()
-        .fill(row_bg)
-        .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
+    ui.horizontal(|ui| {
                 let indent = depth as f32 * 16.0;
                 if depth > 0 {
                     let rect = ui.available_rect_before_wrap();
@@ -1751,8 +1693,7 @@ fn render_record_tree(
                         type_response.on_hover_text("Click to filter by this type");
                     });
                 }
-            });
-        });
+    });
 
     if node.expanded && node.is_folder {
         for child in &mut node.children {
