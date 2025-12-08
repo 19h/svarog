@@ -213,8 +213,7 @@ pub enum StructRefTarget {
 pub struct IncomingStructReference {
     pub source_name: String,
     pub source_index: usize,
-    pub property_name: String,
-    pub is_array: bool,
+    pub property_names: Vec<String>,
 }
 
 /// Index mapping record indices to their incoming references
@@ -287,6 +286,14 @@ pub enum ActiveTab {
     DataCoreBrowser,
 }
 
+/// A navigation entry for the DataCore browser history
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationEntry {
+    Record(usize),
+    Struct(usize),
+    Enum(usize),
+}
+
 /// Active page within the DataCore browser
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DataCorePage {
@@ -334,9 +341,10 @@ pub struct AppState {
     pub struct_reference_index: Option<std::sync::Arc<StructReferenceIndex>>,
     pub struct_outgoing_refs: Vec<StructTypeReference>,
     pub struct_incoming_refs: Vec<IncomingStructReference>,
+    pub enum_incoming_refs: Vec<IncomingStructReference>,
     pub references_expanded: bool,
     pub incoming_expanded: bool,
-    pub navigation_history: Vec<usize>,
+    pub navigation_history: Vec<NavigationEntry>,
     pub navigation_index: usize,
     pub selected_line: Option<usize>,
     pub datacore_page: DataCorePage,
@@ -390,6 +398,7 @@ impl AppState {
             struct_reference_index: None,
             struct_outgoing_refs: Vec::new(),
             struct_incoming_refs: Vec::new(),
+            enum_incoming_refs: Vec::new(),
             references_expanded: true,
             incoming_expanded: true,
             navigation_history: Vec::new(),

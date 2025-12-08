@@ -281,18 +281,17 @@ pub fn build_reference_index(db: Arc<DataCoreDatabase>, sender: Sender<WorkerMes
 fn build_struct_reference_index(db: Arc<DataCoreDatabase>, sender: Sender<WorkerMessage>) {
     use svarog::datacore::DataType;
 
-    let mut incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>> =
+    // First pass: collect all references from each struct to each target
+    // Key: (target_type_index, source_struct_index), Value: Vec<property_name>
+    let mut struct_refs: std::collections::HashMap<(usize, usize), Vec<String>> =
         std::collections::HashMap::new();
-    let mut enum_incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>> =
+    let mut enum_refs: std::collections::HashMap<(usize, usize), Vec<String>> =
         std::collections::HashMap::new();
 
     let struct_defs = db.struct_definitions();
     let prop_defs = db.property_definitions();
 
     for (struct_idx, struct_def) in struct_defs.iter().enumerate() {
-        let struct_name = db.struct_name(struct_idx).unwrap_or("Unknown").to_string();
-
-        // Get properties for this struct
         let first_attr = struct_def.first_attribute_index as usize;
         let attr_count = struct_def.attribute_count as usize;
 
@@ -303,48 +302,72 @@ fn build_struct_reference_index(db: Arc<DataCoreDatabase>, sender: Sender<Worker
             let prop = &prop_defs[prop_idx];
             let prop_name = db.property_name(prop).unwrap_or("unknown").to_string();
 
-            // Check the data type and conversion type
             let data_type = DataType::from_u16(prop.data_type);
             let conv_type = DataType::from_u16(prop.conversion_type);
 
-            // Check if this property references a struct type
             match (data_type, conv_type) {
                 (Some(DataType::Class), _) |
                 (Some(DataType::StrongPointer), _) |
                 (Some(DataType::WeakPointer), _) |
                 (Some(DataType::Reference), _) => {
-                    // The struct_index in the property tells us which struct type
                     let target_struct = prop.struct_index as usize;
                     if target_struct < struct_defs.len() {
-                        incoming
-                            .entry(target_struct)
+                        struct_refs
+                            .entry((target_struct, struct_idx))
                             .or_default()
-                            .push(IncomingStructReference {
-                                source_name: struct_name.clone(),
-                                source_index: struct_idx,
-                                property_name: prop_name.clone(),
-                                is_array: false,
-                            });
+                            .push(prop_name);
                     }
                 }
                 (Some(DataType::EnumChoice), _) | (_, Some(DataType::EnumChoice)) => {
-                    // Enum reference
                     let target_enum = prop.struct_index as usize;
                     if target_enum < db.enum_definitions().len() {
-                        enum_incoming
-                            .entry(target_enum)
+                        enum_refs
+                            .entry((target_enum, struct_idx))
                             .or_default()
-                            .push(IncomingStructReference {
-                                source_name: struct_name.clone(),
-                                source_index: struct_idx,
-                                property_name: prop_name,
-                                is_array: false,
-                            });
+                            .push(prop_name);
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    // Second pass: convert to IncomingStructReference format, grouped by target
+    let mut incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>> =
+        std::collections::HashMap::new();
+    let mut enum_incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>> =
+        std::collections::HashMap::new();
+
+    for ((target_struct, source_struct), property_names) in struct_refs {
+        let source_name = db.struct_name(source_struct).unwrap_or("Unknown").to_string();
+        incoming
+            .entry(target_struct)
+            .or_default()
+            .push(IncomingStructReference {
+                source_name,
+                source_index: source_struct,
+                property_names,
+            });
+    }
+
+    for ((target_enum, source_struct), property_names) in enum_refs {
+        let source_name = db.struct_name(source_struct).unwrap_or("Unknown").to_string();
+        enum_incoming
+            .entry(target_enum)
+            .or_default()
+            .push(IncomingStructReference {
+                source_name,
+                source_index: source_struct,
+                property_names,
+            });
+    }
+
+    // Sort by source name for consistency
+    for refs in incoming.values_mut() {
+        refs.sort_by(|a, b| a.source_name.cmp(&b.source_name));
+    }
+    for refs in enum_incoming.values_mut() {
+        refs.sort_by(|a, b| a.source_name.cmp(&b.source_name));
     }
 
     sender.send(WorkerMessage::StructReferenceIndexReady(Arc::new(StructReferenceIndex {

@@ -3,7 +3,7 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, Ui, Sense, Vec2, Key, CursorIcon};
 use std::sync::Arc;
 
-use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, IncomingStructReference, RecordReference, ReferenceIndex, ReferenceType, StructRefTarget, StructTypeReference};
+use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, NavigationEntry, RecordReference, ReferenceIndex, ReferenceType, StructRefTarget, StructTypeReference};
 use crate::widgets::{progress_bar, search_box};
 use crate::worker;
 
@@ -263,7 +263,7 @@ impl DataCoreBrowserPanel {
                                             ui.label(RichText::new("Select a record to view its contents").color(Color32::from_gray(100)));
                                         });
                                     } else {
-                                        render_xml_with_line_numbers(ui, &state.record_xml, &mut state.selected_line);
+                                        render_text_with_line_numbers(ui, &state.record_xml, "dcb_xml_scroll", &mut state.selected_line, true);
                                     }
                                 });
 
@@ -432,15 +432,14 @@ impl DataCoreBrowserPanel {
                         let mut navigate_to_struct: Option<usize> = None;
                         let mut navigate_to_enum: Option<usize> = None;
 
+                        let mut clicked_struct_from_tree: Option<usize> = None;
                         ScrollArea::vertical()
                             .id_salt("dcb_type_tree_scroll")
                             .auto_shrink([false, false])
                             .show(&mut columns[0], |ui| {
                                 if let Some(tree) = &mut state.datacore_type_tree {
                                     let search = state.datacore_search.to_lowercase();
-                                    let selected = &mut state.selected_type;
-                                    let db = state.datacore.clone();
-                                    let struct_ref_index = state.struct_reference_index.clone();
+                                    let selected = state.selected_type;
 
                                     if !search.is_empty() {
                                         for child in &mut tree.children {
@@ -455,17 +454,18 @@ impl DataCoreBrowserPanel {
                                             child,
                                             &search,
                                             selected,
-                                            &db,
                                             0,
                                             &mut row_index,
-                                            &mut state.type_preview,
-                                            &mut state.struct_outgoing_refs,
-                                            &mut state.struct_incoming_refs,
-                                            &struct_ref_index,
+                                            &mut clicked_struct_from_tree,
                                         );
                                     }
                                 }
                             });
+
+                        // Handle click from tree
+                        if let Some(idx) = clicked_struct_from_tree {
+                            navigate_to_struct = Some(idx);
+                        }
 
                         columns[1].vertical(|ui| {
                             // Header with selected struct name
@@ -473,7 +473,7 @@ impl DataCoreBrowserPanel {
                                 if let Some(db) = &state.datacore {
                                     let name = db.struct_name(struct_idx).unwrap_or("Unknown");
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("[T]").strong().color(Color32::from_rgb(180, 220, 140)));
+                                        ui.label(RichText::new("[S]").strong().color(Color32::from_rgb(180, 220, 140)));
                                         ui.label(RichText::new(name).monospace().color(Color32::from_rgb(180, 220, 140)));
                                     });
                                     ui.separator();
@@ -501,14 +501,8 @@ impl DataCoreBrowserPanel {
                                             );
                                         });
                                     } else {
-                                        ScrollArea::vertical()
-                                            .id_salt("dcb_type_preview_scroll")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.add(egui::Label::new(
-                                                    RichText::new(&state.type_preview).monospace().color(Color32::from_gray(210))
-                                                ));
-                                            });
+                                        let mut dummy_selected: Option<usize> = None;
+                                        render_text_with_line_numbers(ui, &state.type_preview, "dcb_type_preview_scroll", &mut dummy_selected, false);
                                     }
                                 });
 
@@ -539,16 +533,28 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.struct_incoming_refs.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
-                                                                    ui.label(RichText::new("[T]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
+                                                                    ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
                                                                     let resp = ui.add(egui::Label::new(
                                                                         RichText::new(&ref_info.source_name).color(Color32::from_rgb(255, 180, 100))
                                                                     ).sense(Sense::click()).truncate());
                                                                     if resp.clicked() { navigate_to_struct = Some(ref_info.source_index); }
                                                                     if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
-                                                                    resp.on_hover_text(format!(".{}", ref_info.property_name));
+                                                                    let fields_str = ref_info.property_names.iter()
+                                                                        .map(|s| format!(".{}", s))
+                                                                        .collect::<Vec<_>>()
+                                                                        .join(", ");
+                                                                    resp.on_hover_text(&fields_str);
+                                                                    // Show field count if multiple
+                                                                    if ref_info.property_names.len() > 1 {
+                                                                        ui.label(RichText::new(format!("({} fields)", ref_info.property_names.len()))
+                                                                            .color(Color32::from_gray(100)).small());
+                                                                    } else if let Some(field) = ref_info.property_names.first() {
+                                                                        ui.label(RichText::new(format!(".{}", field))
+                                                                            .color(Color32::from_gray(100)).small());
+                                                                    }
                                                                 });
                                                             });
                                                         }
@@ -588,11 +594,11 @@ impl DataCoreBrowserPanel {
                                                     .auto_shrink([false, false])
                                                     .show(ui, |ui| {
                                                         for (i, ref_info) in state.struct_outgoing_refs.iter().enumerate() {
-                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
                                                             egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
                                                                 ui.horizontal(|ui| {
                                                                     let (badge, badge_color, target_name, target_idx) = match &ref_info.target_type {
-                                                                        StructRefTarget::Struct { name, index } => ("[T]", Color32::from_rgb(180, 220, 140), name.clone(), Some((*index, false))),
+                                                                        StructRefTarget::Struct { name, index } => ("[S]", Color32::from_rgb(180, 220, 140), name.clone(), Some((*index, false))),
                                                                         StructRefTarget::Enum { name, index } => ("[E]", Color32::from_rgb(220, 180, 120), name.clone(), Some((*index, true))),
                                                                     };
                                                                     ui.label(RichText::new(badge).color(badge_color).monospace().small());
@@ -626,21 +632,10 @@ impl DataCoreBrowserPanel {
 
                         // Handle navigation
                         if let Some(idx) = navigate_to_struct {
-                            state.selected_type = Some(idx);
-                            if let Some(db) = &state.datacore {
-                                state.type_preview = generate_struct_preview(db, idx);
-                                state.struct_outgoing_refs = extract_struct_outgoing_refs(db, idx);
-                                if let Some(struct_ref_idx) = &state.struct_reference_index {
-                                    state.struct_incoming_refs = struct_ref_idx.incoming.get(&idx).cloned().unwrap_or_default();
-                                }
-                            }
+                            Self::navigate_to_struct(state, idx);
                         }
                         if let Some(idx) = navigate_to_enum {
-                            state.datacore_page = DataCorePage::Enums;
-                            state.selected_enum = Some(idx);
-                            if let Some(db) = &state.datacore {
-                                state.enum_preview = generate_enum_preview(db, idx);
-                            }
+                            Self::navigate_to_enum(state, idx);
                         }
                     });
                 } else {
@@ -670,6 +665,9 @@ impl DataCoreBrowserPanel {
                             egui::Stroke::new(2.0, Color32::from_gray(55))
                         );
 
+                        let mut navigate_to_struct: Option<usize> = None;
+                        let mut clicked_enum: Option<usize> = None;
+
                         ScrollArea::vertical()
                             .id_salt("dcb_enum_list_scroll")
                             .auto_shrink([false, false])
@@ -683,7 +681,7 @@ impl DataCoreBrowserPanel {
                                             continue;
                                         }
                                         let is_selected = state.selected_enum == Some(idx);
-                                        let bg = if row % 2 == 0 { Color32::TRANSPARENT } else { Color32::from_rgba_unmultiplied(255, 255, 255, 1) };
+                                        let bg = if row % 2 == 0 { Color32::TRANSPARENT } else { Color32::from_rgba_unmultiplied(255, 255, 255, 3) };
                                         row += 1;
 
                                         egui::Frame::none()
@@ -699,8 +697,7 @@ impl DataCoreBrowserPanel {
                                                     let resp = ui.add(egui::Label::new(text).sense(Sense::click()).truncate())
                                                         .on_hover_cursor(CursorIcon::Default);
                                                     if resp.clicked() {
-                                                        state.selected_enum = Some(idx);
-                                                        state.enum_preview = generate_enum_preview(db, idx);
+                                                        clicked_enum = Some(idx);
                                                     }
                                                 });
                                             });
@@ -708,8 +705,29 @@ impl DataCoreBrowserPanel {
                                 }
                             });
 
+                        // Handle enum click from list
+                        if let Some(idx) = clicked_enum {
+                            Self::navigate_to_enum(state, idx);
+                        }
+
                         columns[1].vertical(|ui| {
-                            let content_height = (panel_height - 40.0).max(120.0);
+                            // Header with selected enum name
+                            if let Some(enum_idx) = state.selected_enum {
+                                if let Some(db) = &state.datacore {
+                                    let name = db.enum_name(enum_idx).unwrap_or("Unknown");
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("[E]").strong().color(Color32::from_rgb(220, 180, 120)));
+                                        ui.label(RichText::new(name).monospace().color(Color32::from_rgb(220, 180, 120)));
+                                    });
+                                    ui.separator();
+                                }
+                            }
+
+                            let incoming_count = state.enum_incoming_refs.len();
+                            let has_incoming = incoming_count > 0;
+                            let refs_panel_height = 120.0;
+                            let content_height = (panel_height - refs_panel_height - 60.0).max(100.0);
+
                             egui::Frame::none()
                                 .fill(Color32::from_gray(25))
                                 .show(ui, |ui| {
@@ -724,17 +742,69 @@ impl DataCoreBrowserPanel {
                                             );
                                         });
                                     } else {
-                                        ScrollArea::vertical()
-                                            .id_salt("dcb_enum_preview_scroll")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.add(egui::Label::new(
-                                                    RichText::new(&state.enum_preview).monospace().color(Color32::from_gray(210))
-                                                ));
-                                            });
+                                        let mut dummy_selected: Option<usize> = None;
+                                        render_text_with_line_numbers(ui, &state.enum_preview, "dcb_enum_preview_scroll", &mut dummy_selected, false);
                                     }
                                 });
+
+                            ui.add_space(8.0);
+
+                            // Incoming references panel
+                            egui::Frame::none()
+                                .fill(Color32::from_gray(25))
+                                .inner_margin(8.0)
+                                .show(ui, |ui| {
+                                    ui.set_height(refs_panel_height);
+
+                                    ui.vertical(|ui| {
+                                        let header_text = format!("Used By{}", if has_incoming { format!(" ({})", incoming_count) } else { String::new() });
+                                        let header_color = if has_incoming { Color32::from_rgb(255, 180, 150) } else { Color32::from_gray(100) };
+                                        ui.label(RichText::new(header_text).strong().color(header_color));
+
+                                        ui.add_space(4.0);
+
+                                        if has_incoming {
+                                            ScrollArea::vertical()
+                                                .id_salt("dcb_enum_incoming_scroll")
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    for (i, ref_info) in state.enum_incoming_refs.iter().enumerate() {
+                                                        let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(30) };
+                                                        egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
+                                                                let resp = ui.add(egui::Label::new(
+                                                                    RichText::new(&ref_info.source_name).color(Color32::from_rgb(255, 180, 100))
+                                                                ).sense(Sense::click()).truncate());
+                                                                if resp.clicked() { navigate_to_struct = Some(ref_info.source_index); }
+                                                                if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+                                                                let fields_str = ref_info.property_names.iter()
+                                                                    .map(|s| format!(".{}", s))
+                                                                    .collect::<Vec<_>>()
+                                                                    .join(", ");
+                                                                resp.on_hover_text(&fields_str);
+                                                                if ref_info.property_names.len() > 1 {
+                                                                    ui.label(RichText::new(format!("({} fields)", ref_info.property_names.len()))
+                                                                        .color(Color32::from_gray(100)).small());
+                                                                } else if let Some(field) = ref_info.property_names.first() {
+                                                                    ui.label(RichText::new(format!(".{}", field))
+                                                                        .color(Color32::from_gray(100)).small());
+                                                                }
+                                                            });
+                                                        });
+                                                    }
+                                                });
+                                        } else {
+                                            ui.label(RichText::new("none").color(Color32::from_gray(60)).italics());
+                                        }
+                                    });
+                                });
                         });
+
+                        // Handle navigation
+                        if let Some(idx) = navigate_to_struct {
+                            Self::navigate_to_struct(state, idx);
+                        }
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -773,30 +843,66 @@ impl DataCoreBrowserPanel {
     fn navigate_back(state: &mut AppState) {
         if state.navigation_index > 0 {
             state.navigation_index -= 1;
-            let idx = state.navigation_history[state.navigation_index];
-            Self::load_record_without_history(state, idx);
+            let entry = state.navigation_history[state.navigation_index];
+            Self::load_entry_without_history(state, entry);
         }
     }
 
     fn navigate_forward(state: &mut AppState) {
         if state.navigation_index + 1 < state.navigation_history.len() {
             state.navigation_index += 1;
-            let idx = state.navigation_history[state.navigation_index];
-            Self::load_record_without_history(state, idx);
+            let entry = state.navigation_history[state.navigation_index];
+            Self::load_entry_without_history(state, entry);
         }
     }
 
-    fn navigate_to_record(state: &mut AppState, idx: usize) {
+    fn navigate_to(state: &mut AppState, entry: NavigationEntry) {
+        // Don't add duplicate if it's the same as current
+        if let Some(&current) = state.navigation_history.get(state.navigation_index) {
+            if current == entry {
+                return;
+            }
+        }
+
         // Truncate forward history if we're not at the end
-        if state.navigation_index + 1 < state.navigation_history.len() {
+        if !state.navigation_history.is_empty() && state.navigation_index + 1 < state.navigation_history.len() {
             state.navigation_history.truncate(state.navigation_index + 1);
         }
 
         // Add to history
-        state.navigation_history.push(idx);
+        state.navigation_history.push(entry);
         state.navigation_index = state.navigation_history.len() - 1;
 
-        Self::load_record_without_history(state, idx);
+        Self::load_entry_without_history(state, entry);
+    }
+
+    fn navigate_to_record(state: &mut AppState, idx: usize) {
+        Self::navigate_to(state, NavigationEntry::Record(idx));
+    }
+
+    fn navigate_to_struct(state: &mut AppState, idx: usize) {
+        Self::navigate_to(state, NavigationEntry::Struct(idx));
+    }
+
+    fn navigate_to_enum(state: &mut AppState, idx: usize) {
+        Self::navigate_to(state, NavigationEntry::Enum(idx));
+    }
+
+    fn load_entry_without_history(state: &mut AppState, entry: NavigationEntry) {
+        match entry {
+            NavigationEntry::Record(idx) => {
+                state.datacore_page = DataCorePage::Records;
+                Self::load_record_without_history(state, idx);
+            }
+            NavigationEntry::Struct(idx) => {
+                state.datacore_page = DataCorePage::Structs;
+                Self::load_struct_without_history(state, idx);
+            }
+            NavigationEntry::Enum(idx) => {
+                state.datacore_page = DataCorePage::Enums;
+                Self::load_enum_without_history(state, idx);
+            }
+        }
     }
 
     fn load_record_without_history(state: &mut AppState, idx: usize) {
@@ -825,6 +931,33 @@ impl DataCoreBrowserPanel {
 
                 // Extract incoming references from the index
                 state.incoming_references = extract_incoming_references(db, idx, &state.reference_index, &records);
+            }
+        }
+    }
+
+    fn load_struct_without_history(state: &mut AppState, idx: usize) {
+        state.selected_type = Some(idx);
+
+        if let Some(db) = &state.datacore {
+            state.type_preview = generate_struct_preview(db, idx);
+            state.struct_outgoing_refs = extract_struct_outgoing_refs(db, idx);
+            if let Some(struct_ref_idx) = &state.struct_reference_index {
+                state.struct_incoming_refs = struct_ref_idx.incoming.get(&idx).cloned().unwrap_or_default();
+            } else {
+                state.struct_incoming_refs.clear();
+            }
+        }
+    }
+
+    fn load_enum_without_history(state: &mut AppState, idx: usize) {
+        state.selected_enum = Some(idx);
+
+        if let Some(db) = &state.datacore {
+            state.enum_preview = generate_enum_preview(db, idx);
+            if let Some(struct_ref_idx) = &state.struct_reference_index {
+                state.enum_incoming_refs = struct_ref_idx.enum_incoming.get(&idx).cloned().unwrap_or_default();
+            } else {
+                state.enum_incoming_refs.clear();
             }
         }
     }
@@ -859,38 +992,39 @@ fn generate_enum_preview(db: &svarog::datacore::DataCoreDatabase, enum_index: us
     exporter.generate_enum_preview(enum_index)
 }
 
-/// Render XML content with line numbers and click-to-select
-fn render_xml_with_line_numbers(ui: &mut Ui, xml: &str, selected_line: &mut Option<usize>) {
-    let lines: Vec<&str> = xml.lines().collect();
+/// Render text content with line numbers and consistent styling
+fn render_text_with_line_numbers(ui: &mut Ui, text: &str, scroll_id: &str, selected_line: &mut Option<usize>, selectable: bool) {
+    let lines: Vec<&str> = text.lines().collect();
     let line_count = lines.len();
-    let num_digits = format!("{}", line_count).len();
-    let line_num_width = num_digits as f32 * 7.0 + 12.0;
+    let num_digits = format!("{}", line_count).len().max(3);
+    let font_size = 11.0;
+    let line_num_width = num_digits as f32 * 6.5 + 10.0;
+    let row_height = 15.0;
 
     ScrollArea::vertical()
-        .id_salt("dcb_xml_scroll")
+        .id_salt(scroll_id)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let available_width = ui.available_width();
-            let _text_area_width = available_width - line_num_width - 12.0;
 
             for (i, line) in lines.iter().enumerate() {
                 let line_num = i + 1;
-                let is_selected = *selected_line == Some(i);
+                let is_selected = selectable && *selected_line == Some(i);
 
                 // Background color for the entire row (very subtle alternating)
                 let bg_color = if is_selected {
                     Color32::from_rgba_unmultiplied(100, 180, 255, 40)
                 } else if i % 2 == 1 {
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 1)  // 75% less opaque
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 3)
                 } else {
                     Color32::TRANSPARENT
                 };
 
                 // Allocate the full row
-                let row_height = 18.0;
+                let sense = if selectable { Sense::click() } else { Sense::hover() };
                 let (row_rect, row_response) = ui.allocate_exact_size(
                     egui::vec2(available_width, row_height),
-                    Sense::click()
+                    sense
                 );
 
                 // Draw row background
@@ -900,14 +1034,14 @@ fn render_xml_with_line_numbers(ui: &mut Ui, xml: &str, selected_line: &mut Opti
                 let line_num_color = if is_selected {
                     Color32::from_rgb(100, 180, 255)
                 } else {
-                    Color32::from_gray(100)
+                    Color32::from_gray(80)
                 };
 
                 ui.painter().text(
                     egui::pos2(row_rect.left() + 4.0, row_rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     format!("{:>width$}", line_num, width = num_digits),
-                    egui::FontId::monospace(13.0),
+                    egui::FontId::monospace(font_size),
                     line_num_color,
                 );
 
@@ -915,12 +1049,12 @@ fn render_xml_with_line_numbers(ui: &mut Ui, xml: &str, selected_line: &mut Opti
                 let sep_x = row_rect.left() + line_num_width;
                 ui.painter().line_segment(
                     [egui::pos2(sep_x, row_rect.top()), egui::pos2(sep_x, row_rect.bottom())],
-                    egui::Stroke::new(1.0, Color32::from_gray(45)),
+                    egui::Stroke::new(1.0, Color32::from_gray(40)),
                 );
 
                 // Content text - clipped to available width
-                let text_start_x = sep_x + 8.0;
-                let text_color = Color32::from_gray(210);
+                let text_start_x = sep_x + 6.0;
+                let text_color = Color32::from_gray(200);
 
                 // Create a clip rect to prevent text overflow
                 let text_clip_rect = egui::Rect::from_min_max(
@@ -932,11 +1066,11 @@ fn render_xml_with_line_numbers(ui: &mut Ui, xml: &str, selected_line: &mut Opti
                     egui::pos2(text_start_x, row_rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     *line,
-                    egui::FontId::monospace(13.0),
+                    egui::FontId::monospace(font_size),
                     text_color,
                 );
 
-                if row_response.clicked() {
+                if selectable && row_response.clicked() {
                     *selected_line = Some(i);
                 }
             }
@@ -973,14 +1107,10 @@ fn render_type_tree(
     ui: &mut Ui,
     node: &mut DataCoreTypeNode,
     search: &str,
-    selected: &mut Option<usize>,
-    db: &Option<Arc<svarog::datacore::DataCoreDatabase>>,
+    selected: Option<usize>,
     depth: usize,
     row_index: &mut usize,
-    type_preview: &mut String,
-    struct_outgoing_refs: &mut Vec<StructTypeReference>,
-    struct_incoming_refs: &mut Vec<IncomingStructReference>,
-    struct_ref_index: &Option<Arc<crate::state::StructReferenceIndex>>,
+    clicked_struct: &mut Option<usize>,
 ) {
     let show_node = if search.is_empty() {
         true
@@ -998,7 +1128,7 @@ fn render_type_tree(
     let row_bg = if *row_index % 2 == 0 {
         Color32::TRANSPARENT
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 1)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 3)
     };
     *row_index += 1;
 
@@ -1007,7 +1137,7 @@ fn render_type_tree(
         .inner_margin(egui::Margin::symmetric(4.0, 2.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let indent = depth as f32 * 32.0; // 4-space style indentation
+                let indent = depth as f32 * 32.0;
                 if depth > 0 {
                     let rect = ui.available_rect_before_wrap();
                     for d in 0..depth {
@@ -1051,7 +1181,7 @@ fn render_type_tree(
                     }
                 }
 
-                ui.label(RichText::new("[T]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
+                ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
 
                 let label_text = RichText::new(&node.name)
                     .monospace()
@@ -1060,16 +1190,7 @@ fn render_type_tree(
                     .on_hover_cursor(CursorIcon::Default);
                 if resp.clicked() {
                     if let Some(idx) = node.struct_index {
-                        *selected = Some(idx);
-                        if let Some(db) = db.as_ref() {
-                            *type_preview = generate_struct_preview(db, idx);
-                            *struct_outgoing_refs = extract_struct_outgoing_refs(db, idx);
-                            if let Some(ref_idx) = struct_ref_index {
-                                *struct_incoming_refs = ref_idx.incoming.get(&idx).cloned().unwrap_or_default();
-                            } else {
-                                struct_incoming_refs.clear();
-                            }
-                        }
+                        *clicked_struct = Some(idx);
                     }
                 }
             });
@@ -1077,7 +1198,7 @@ fn render_type_tree(
 
     if node.expanded {
         for child in &mut node.children {
-            render_type_tree(ui, child, search, selected, db, depth + 1, row_index, type_preview, struct_outgoing_refs, struct_incoming_refs, struct_ref_index);
+            render_type_tree(ui, child, search, selected, depth + 1, row_index, clicked_struct);
         }
     }
 }
