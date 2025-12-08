@@ -1,11 +1,9 @@
 //! DataCore database browser panel
 
 use eframe::egui::{self, Color32, RichText, ScrollArea, Ui, Sense, Vec2, Key, CursorIcon};
-use std::fmt::Write as _;
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, RecordReference, ReferenceIndex, ReferenceType};
+use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, IncomingStructReference, RecordReference, ReferenceIndex, ReferenceType, StructRefTarget, StructTypeReference};
 use crate::widgets::{progress_bar, search_box};
 use crate::worker;
 
@@ -431,6 +429,9 @@ impl DataCoreBrowserPanel {
                             egui::Stroke::new(2.0, Color32::from_gray(55))
                         );
 
+                        let mut navigate_to_struct: Option<usize> = None;
+                        let mut navigate_to_enum: Option<usize> = None;
+
                         ScrollArea::vertical()
                             .id_salt("dcb_type_tree_scroll")
                             .auto_shrink([false, false])
@@ -439,6 +440,7 @@ impl DataCoreBrowserPanel {
                                     let search = state.datacore_search.to_lowercase();
                                     let selected = &mut state.selected_type;
                                     let db = state.datacore.clone();
+                                    let struct_ref_index = state.struct_reference_index.clone();
 
                                     if !search.is_empty() {
                                         for child in &mut tree.children {
@@ -448,37 +450,58 @@ impl DataCoreBrowserPanel {
 
                                     let mut row_index = 0usize;
                                     for child in &mut tree.children {
-                                            render_type_tree(
-                                                ui,
-                                                child,
-                                                &search,
-                                                selected,
-                                                &db,
-                                                0,
-                                                &mut row_index,
-                                                &mut state.type_preview,
-                                            );
+                                        render_type_tree(
+                                            ui,
+                                            child,
+                                            &search,
+                                            selected,
+                                            &db,
+                                            0,
+                                            &mut row_index,
+                                            &mut state.type_preview,
+                                            &mut state.struct_outgoing_refs,
+                                            &mut state.struct_incoming_refs,
+                                            &struct_ref_index,
+                                        );
                                     }
                                 }
                             });
 
                         columns[1].vertical(|ui| {
-                            let content_height = (panel_height - 40.0).max(120.0);
+                            // Header with selected struct name
+                            if let Some(struct_idx) = state.selected_type {
+                                if let Some(db) = &state.datacore {
+                                    let name = db.struct_name(struct_idx).unwrap_or("Unknown");
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("[T]").strong().color(Color32::from_rgb(180, 220, 140)));
+                                        ui.label(RichText::new(name).monospace().color(Color32::from_rgb(180, 220, 140)));
+                                    });
+                                    ui.separator();
+                                }
+                            }
+
+                            let outgoing_count = state.struct_outgoing_refs.len();
+                            let incoming_count = state.struct_incoming_refs.len();
+                            let has_outgoing = outgoing_count > 0;
+                            let has_incoming = incoming_count > 0;
+                            let refs_panel_height = 120.0;
+                            let content_height = (panel_height - refs_panel_height - 60.0).max(100.0);
+
                             egui::Frame::none()
                                 .fill(Color32::from_gray(25))
                                 .show(ui, |ui| {
                                     ui.set_min_height(content_height);
-                            ui.set_max_height(content_height);
+                                    ui.set_max_height(content_height);
 
-                            if state.type_preview.is_empty() {
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(
-                                        RichText::new("Select a struct to view its layout")
-                                            .color(Color32::from_gray(100)),
-                                    );
-                                });
-                            } else {
-                                ScrollArea::vertical()
+                                    if state.type_preview.is_empty() {
+                                        ui.centered_and_justified(|ui| {
+                                            ui.label(
+                                                RichText::new("Select a struct to view its layout")
+                                                    .color(Color32::from_gray(100)),
+                                            );
+                                        });
+                                    } else {
+                                        ScrollArea::vertical()
                                             .id_salt("dcb_type_preview_scroll")
                                             .auto_shrink([false, false])
                                             .show(ui, |ui| {
@@ -488,7 +511,137 @@ impl DataCoreBrowserPanel {
                                             });
                                     }
                                 });
+
+                            ui.add_space(8.0);
+
+                            // References panel (same layout as records)
+                            ui.horizontal(|ui| {
+                                let half_width = (ui.available_width() / 2.0 - 8.0).max(100.0);
+
+                                // Incoming references (structs that reference this struct)
+                                egui::Frame::none()
+                                    .fill(Color32::from_gray(25))
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(half_width);
+                                        ui.set_height(refs_panel_height);
+
+                                        ui.vertical(|ui| {
+                                            let header_text = format!("Used By{}", if has_incoming { format!(" ({})", incoming_count) } else { String::new() });
+                                            let header_color = if has_incoming { Color32::from_rgb(255, 180, 150) } else { Color32::from_gray(100) };
+                                            ui.label(RichText::new(header_text).strong().color(header_color));
+
+                                            ui.add_space(4.0);
+
+                                            if has_incoming {
+                                                ScrollArea::vertical()
+                                                    .id_salt("dcb_struct_incoming_scroll")
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        for (i, ref_info) in state.struct_incoming_refs.iter().enumerate() {
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label(RichText::new("[T]").color(Color32::from_rgb(180, 220, 140)).monospace().small());
+                                                                    let resp = ui.add(egui::Label::new(
+                                                                        RichText::new(&ref_info.source_name).color(Color32::from_rgb(255, 180, 100))
+                                                                    ).sense(Sense::click()).truncate());
+                                                                    if resp.clicked() { navigate_to_struct = Some(ref_info.source_index); }
+                                                                    if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+                                                                    resp.on_hover_text(format!(".{}", ref_info.property_name));
+                                                                });
+                                                            });
+                                                        }
+                                                    });
+                                            } else {
+                                                ui.label(RichText::new("none").color(Color32::from_gray(60)).italics());
+                                            }
+                                        });
+                                    });
+
+                                let sep_rect = ui.available_rect_before_wrap();
+                                ui.painter().vline(
+                                    sep_rect.left() + 4.0,
+                                    sep_rect.top()..=sep_rect.bottom(),
+                                    egui::Stroke::new(1.0, Color32::from_gray(50))
+                                );
+                                ui.add_space(8.0);
+
+                                // Outgoing references (structs/enums referenced by this struct)
+                                egui::Frame::none()
+                                    .fill(Color32::from_gray(25))
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(half_width);
+                                        ui.set_height(refs_panel_height);
+
+                                        ui.vertical(|ui| {
+                                            let header_text = format!("References{}", if has_outgoing { format!(" ({})", outgoing_count) } else { String::new() });
+                                            let header_color = if has_outgoing { Color32::from_rgb(200, 180, 255) } else { Color32::from_gray(100) };
+                                            ui.label(RichText::new(header_text).strong().color(header_color));
+
+                                            ui.add_space(4.0);
+
+                                            if has_outgoing {
+                                                ScrollArea::vertical()
+                                                    .id_salt("dcb_struct_outgoing_scroll")
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        for (i, ref_info) in state.struct_outgoing_refs.iter().enumerate() {
+                                                            let bg = if i % 2 == 0 { Color32::from_gray(28) } else { Color32::from_gray(32) };
+                                                            egui::Frame::none().fill(bg).inner_margin(2.0).show(ui, |ui| {
+                                                                ui.horizontal(|ui| {
+                                                                    let (badge, badge_color, target_name, target_idx) = match &ref_info.target_type {
+                                                                        StructRefTarget::Struct { name, index } => ("[T]", Color32::from_rgb(180, 220, 140), name.clone(), Some((*index, false))),
+                                                                        StructRefTarget::Enum { name, index } => ("[E]", Color32::from_rgb(220, 180, 120), name.clone(), Some((*index, true))),
+                                                                    };
+                                                                    ui.label(RichText::new(badge).color(badge_color).monospace().small());
+                                                                    ui.label(RichText::new(&ref_info.property_name).color(Color32::from_gray(140)));
+                                                                    ui.label(RichText::new("->").color(Color32::from_gray(80)));
+
+                                                                    if let Some((idx, is_enum)) = target_idx {
+                                                                        let resp = ui.add(egui::Label::new(
+                                                                            RichText::new(&target_name).color(Color32::from_rgb(100, 180, 255))
+                                                                        ).sense(Sense::click()).truncate());
+                                                                        if resp.clicked() {
+                                                                            if is_enum {
+                                                                                navigate_to_enum = Some(idx);
+                                                                            } else {
+                                                                                navigate_to_struct = Some(idx);
+                                                                            }
+                                                                        }
+                                                                        if resp.hovered() { ui.ctx().set_cursor_icon(CursorIcon::PointingHand); }
+                                                                    }
+                                                                });
+                                                            });
+                                                        }
+                                                    });
+                                            } else {
+                                                ui.label(RichText::new("none").color(Color32::from_gray(60)).italics());
+                                            }
+                                        });
+                                    });
+                            });
                         });
+
+                        // Handle navigation
+                        if let Some(idx) = navigate_to_struct {
+                            state.selected_type = Some(idx);
+                            if let Some(db) = &state.datacore {
+                                state.type_preview = generate_struct_preview(db, idx);
+                                state.struct_outgoing_refs = extract_struct_outgoing_refs(db, idx);
+                                if let Some(struct_ref_idx) = &state.struct_reference_index {
+                                    state.struct_incoming_refs = struct_ref_idx.incoming.get(&idx).cloned().unwrap_or_default();
+                                }
+                            }
+                        }
+                        if let Some(idx) = navigate_to_enum {
+                            state.datacore_page = DataCorePage::Enums;
+                            state.selected_enum = Some(idx);
+                            if let Some(db) = &state.datacore {
+                                state.enum_preview = generate_enum_preview(db, idx);
+                            }
+                        }
                     });
                 } else {
                     ui.centered_and_justified(|ui| {
@@ -668,7 +821,7 @@ impl DataCoreBrowserPanel {
                     }
                     Err(e) => state.record_xml = format!("Error: {}", e),
                 }
-                state.record_references = extract_references(db, record);
+                state.record_references = extract_references(db, record, &state.reference_index);
 
                 // Extract incoming references from the index
                 state.incoming_references = extract_incoming_references(db, idx, &state.reference_index, &records);
@@ -702,32 +855,8 @@ impl DataCoreBrowserPanel {
 }
 
 fn generate_enum_preview(db: &svarog::datacore::DataCoreDatabase, enum_index: usize) -> String {
-    let mut out = String::new();
-    let defs = db.enum_definitions();
-    let Some(def) = defs.get(enum_index) else { return String::new() };
-    let value_count = def.value_count;
-    let first_value_index = def.first_value_index;
-
-    let name = db.enum_name(enum_index).unwrap_or("Unknown");
-    let values = db.enum_options(def);
-
-    let _ = writeln!(out, "/*");
-    let _ = writeln!(out, "enum_index : {}", enum_index);
-    let _ = writeln!(out, "value_count: {}", value_count);
-    let _ = writeln!(out, "first_index: {}", first_value_index);
-    let _ = writeln!(out, "*/");
-
-    let _ = writeln!(out, "enum {} {{", name);
-    if values.is_empty() {
-        let _ = writeln!(out, "    // <no values>");
-    } else {
-        for (i, v) in values.iter().enumerate() {
-            let _ = writeln!(out, "    {} = {},", v, i);
-        }
-    }
-    let _ = writeln!(out, "}};");
-
-    out
+    let exporter = svarog::datacore::CHeaderExporter::new(db);
+    exporter.generate_enum_preview(enum_index)
 }
 
 /// Render XML content with line numbers and click-to-select
@@ -849,6 +978,9 @@ fn render_type_tree(
     depth: usize,
     row_index: &mut usize,
     type_preview: &mut String,
+    struct_outgoing_refs: &mut Vec<StructTypeReference>,
+    struct_incoming_refs: &mut Vec<IncomingStructReference>,
+    struct_ref_index: &Option<Arc<crate::state::StructReferenceIndex>>,
 ) {
     let show_node = if search.is_empty() {
         true
@@ -931,6 +1063,12 @@ fn render_type_tree(
                         *selected = Some(idx);
                         if let Some(db) = db.as_ref() {
                             *type_preview = generate_struct_preview(db, idx);
+                            *struct_outgoing_refs = extract_struct_outgoing_refs(db, idx);
+                            if let Some(ref_idx) = struct_ref_index {
+                                *struct_incoming_refs = ref_idx.incoming.get(&idx).cloned().unwrap_or_default();
+                            } else {
+                                struct_incoming_refs.clear();
+                            }
                         }
                     }
                 }
@@ -939,325 +1077,83 @@ fn render_type_tree(
 
     if node.expanded {
         for child in &mut node.children {
-            render_type_tree(ui, child, search, selected, db, depth + 1, row_index, type_preview);
+            render_type_tree(ui, child, search, selected, db, depth + 1, row_index, type_preview, struct_outgoing_refs, struct_incoming_refs, struct_ref_index);
         }
     }
 }
 
 fn generate_struct_preview(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> String {
-    let (struct_order, enum_order) = topo_structs_with_enums(db, &[struct_index]);
-    let mut output = String::new();
-
-    // Forward declarations
-    for enum_idx in &enum_order {
-        if let Some(name) = db.enum_name(*enum_idx) {
-            let _ = writeln!(output, "enum {};", name);
-        }
-    }
-    for struct_idx in &struct_order {
-        if let Some(name) = db.struct_name(*struct_idx) {
-            let _ = writeln!(output, "struct {};", name);
-        }
-    }
-    if !struct_order.is_empty() || !enum_order.is_empty() {
-        output.push('\n');
-    }
-
-    // Definitions
-    for enum_idx in &enum_order {
-        output.push_str(&generate_enum_preview(db, *enum_idx));
-        output.push('\n');
-    }
-
-    for s_idx in &struct_order {
-        output.push_str(&render_struct(db, *s_idx));
-        output.push('\n');
-    }
-
-    output
+    let exporter = svarog::datacore::CHeaderExporter::new(db);
+    exporter.generate_struct_preview(struct_index)
 }
 
-fn render_struct(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> String {
-    let mut output = String::new();
-    let defs = db.struct_definitions();
-    let Some(def) = defs.get(struct_index) else { return String::new() };
-    let struct_size = def.struct_size as usize;
-    let attribute_count = def.attribute_count;
-    let first_attr = def.first_attribute_index;
-    let parent_index = def.parent_type_index;
-
-    let name = db.struct_name(struct_index).unwrap_or("Unknown");
-    let parent_name = if parent_index >= 0 {
-        db.struct_name(parent_index as usize).unwrap_or("Unknown")
-    } else {
-        ""
-    };
-
-    let layout = build_struct_layout(db, struct_index);
-    let payload_size: usize = layout.iter().map(|f| f.size).sum();
-
-    let _ = writeln!(output, "/*");
-    let _ = writeln!(output, "struct_index : {}", struct_index);
-    let _ = writeln!(
-        output,
-        "parent       : {}",
-        if parent_index >= 0 {
-            format!("{} ({})", parent_name, parent_index)
-        } else {
-            "none".to_string()
-        }
-    );
-    let _ = writeln!(
-        output,
-        "attributes   : {} (first @ {})",
-        attribute_count, first_attr
-    );
-    let _ = writeln!(output, "size         : {} bytes", struct_size);
-    let _ = writeln!(output, "payload bytes: {} bytes", payload_size);
-    if payload_size < struct_size {
-        let _ = writeln!(output, "padding      : {} bytes", struct_size - payload_size);
-    } else if payload_size > struct_size {
-        let _ = writeln!(output, "warning      : layout exceeds struct_size by {} bytes", payload_size - struct_size);
-    }
-    let _ = writeln!(output, "*/");
-
-    if parent_index >= 0 {
-        let _ = writeln!(output, "struct {} : {} {{", name, parent_name);
-    } else {
-        let _ = writeln!(output, "struct {} {{", name);
-    }
-
-    for field in layout {
-        let offset_label = format!("0x{:04X}", field.offset);
-        if field.is_padding {
-            let _ = writeln!(
-                output,
-                "    uint8_t pad_{:04X}[{}]; // offset {}, padding",
-                field.offset,
-                field.size,
-                offset_label
-            );
-        } else {
-            let _ = writeln!(
-                output,
-                "    {} {}; // offset {}, size {}",
-                field.type_name,
-                field.name,
-                offset_label,
-                field.size
-            );
-        }
-    }
-
-    let _ = writeln!(output, "}};");
-
-    output
-}
-
-fn describe_datacore_type(
-    db: &svarog::datacore::DataCoreDatabase,
-    prop: &svarog::datacore::structs::DataCorePropertyDefinition,
-) -> String {
-    use svarog::datacore::DataType;
-
-    let struct_idx = prop.struct_index;
-    let data_type = prop.data_type;
-    let Some(dt) = DataType::from_u16(data_type) else {
-        return format!("0x{:04X}", data_type);
-    };
-
-    match dt {
-        DataType::Boolean => "bool".to_string(),
-        DataType::SByte => "int8_t".to_string(),
-        DataType::Int16 => "int16_t".to_string(),
-        DataType::Int32 => "int32_t".to_string(),
-        DataType::Int64 => "int64_t".to_string(),
-        DataType::Byte => "uint8_t".to_string(),
-        DataType::UInt16 => "uint16_t".to_string(),
-        DataType::UInt32 => "uint32_t".to_string(),
-        DataType::UInt64 => "uint64_t".to_string(),
-        DataType::Single => "float".to_string(),
-        DataType::Double => "double".to_string(),
-        DataType::String => "string".to_string(),
-        DataType::Locale => "locale".to_string(),
-        DataType::Guid => "guid".to_string(),
-        DataType::EnumChoice => {
-            db.enum_name(struct_idx as usize)
-                .map(|s| format!("enum {}", s))
-                .unwrap_or_else(|| "enum".to_string())
-        }
-        DataType::Class => {
-            db.struct_name(struct_idx as usize).unwrap_or("Unknown").to_string()
-        }
-        DataType::StrongPointer => {
-            let target = db.struct_name(struct_idx as usize).unwrap_or("Unknown");
-            format!("strong_ptr<{}>", target)
-        }
-        DataType::WeakPointer => {
-            let target = db.struct_name(struct_idx as usize).unwrap_or("Unknown");
-            format!("weak_ptr<{}>", target)
-        }
-        DataType::Reference => "record_ref".to_string(),
-    }
-}
-
-#[derive(Debug)]
-struct FieldLayout {
-    name: String,
-    type_name: String,
-    offset: usize,
-    size: usize,
-    is_padding: bool,
-}
-
-fn build_struct_layout(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> Vec<FieldLayout> {
-    let mut layout = Vec::new();
-    let mut offset = 0usize;
-
-    let props = db.get_struct_properties(struct_index);
-    for prop in props {
-        let name = db.property_name(prop).unwrap_or("Unknown").to_string();
-        let type_name = describe_datacore_type(db, prop);
-        let size = property_size(db, prop);
-
-        layout.push(FieldLayout {
-            name,
-            type_name: if prop.is_array() { format!("{}[]", type_name) } else { type_name },
-            offset,
-            size,
-            is_padding: false,
-        });
-
-        offset = offset.saturating_add(size);
-    }
-
-    // Final padding if declared size is larger than accounted bytes
-    if let Some(def) = db.struct_definitions().get(struct_index) {
-        let struct_size = def.struct_size as usize;
-        if offset < struct_size {
-            layout.push(FieldLayout {
-                name: format!("pad_{:04X}", offset),
-                type_name: "uint8_t".to_string(),
-                offset,
-                size: struct_size - offset,
-                is_padding: true,
-            });
-        }
-    }
-
-    layout
-}
-
-fn property_size(
-    db: &svarog::datacore::DataCoreDatabase,
-    prop: &svarog::datacore::structs::DataCorePropertyDefinition,
-) -> usize {
-    use svarog::datacore::DataType;
-
-    // Arrays store (count, first_index) inline
-    if prop.is_array() {
-        return 8;
-    }
-
-    let data_type = prop.data_type;
-    let Some(dt) = DataType::from_u16(data_type) else {
-        return 0;
-    };
-
-    match dt {
-        DataType::Class => db
-            .struct_definitions()
-            .get(prop.struct_index as usize)
-            .map(|d| d.struct_size as usize)
-            .unwrap_or(0),
-    _ => dt.inline_size(),
-    }
-}
-
-fn topo_structs_with_enums(
-    db: &svarog::datacore::DataCoreDatabase,
-    roots: &[usize],
-) -> (Vec<usize>, Vec<usize>) {
-    let mut order = Vec::new();
-    let mut temp = HashSet::new();
-    let mut perm = HashSet::new();
-    let mut enums = Vec::new();
-    let mut enum_seen = HashSet::new();
-
-    fn dfs(
-        db: &svarog::datacore::DataCoreDatabase,
-        idx: usize,
-        temp: &mut HashSet<usize>,
-        perm: &mut HashSet<usize>,
-        order: &mut Vec<usize>,
-        enums: &mut Vec<usize>,
-        enum_seen: &mut HashSet<usize>,
-    ) {
-        if perm.contains(&idx) || temp.contains(&idx) {
-            return;
-        }
-        temp.insert(idx);
-
-        for dep in struct_dependencies(db, idx) {
-            dfs(db, dep, temp, perm, order, enums, enum_seen);
-        }
-        collect_enum_dependencies(db, idx, enums, enum_seen);
-
-        temp.remove(&idx);
-        perm.insert(idx);
-        order.push(idx);
-    }
-
-    for &r in roots {
-        dfs(db, r, &mut temp, &mut perm, &mut order, &mut enums, &mut enum_seen);
-    }
-
-    (order, enums)
-}
-
-fn struct_dependencies(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> Vec<usize> {
-    let mut deps = Vec::new();
-    let mut seen = HashSet::new();
-    for prop in db.get_struct_properties(struct_index) {
-        if let Some(dt) = svarog::datacore::DataType::from_u16(prop.data_type) {
-            match dt {
-                svarog::datacore::DataType::Class
-                | svarog::datacore::DataType::StrongPointer
-                | svarog::datacore::DataType::WeakPointer => {
-                    let dep = prop.struct_index as usize;
-                    if seen.insert(dep) {
-                        deps.push(dep);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    deps
-}
-
-fn collect_enum_dependencies(
+/// Extract outgoing type references from a struct's properties
+fn extract_struct_outgoing_refs(
     db: &svarog::datacore::DataCoreDatabase,
     struct_index: usize,
-    enums: &mut Vec<usize>,
-    enum_seen: &mut HashSet<usize>,
-) {
-    for prop in db.get_struct_properties(struct_index) {
-        if let Some(dt) = svarog::datacore::DataType::from_u16(prop.data_type) {
-            if matches!(dt, svarog::datacore::DataType::EnumChoice) {
-                let eidx = prop.struct_index as usize;
-                if enum_seen.insert(eidx) {
-                    enums.push(eidx);
+) -> Vec<StructTypeReference> {
+    use svarog::datacore::DataType;
+
+    let mut refs = Vec::new();
+    let struct_defs = db.struct_definitions();
+    let prop_defs = db.property_definitions();
+
+    if struct_index >= struct_defs.len() {
+        return refs;
+    }
+
+    let struct_def = &struct_defs[struct_index];
+    let first_attr = struct_def.first_attribute_index as usize;
+    let attr_count = struct_def.attribute_count as usize;
+
+    for prop_idx in first_attr..(first_attr + attr_count) {
+        if prop_idx >= prop_defs.len() {
+            break;
+        }
+        let prop = &prop_defs[prop_idx];
+        let prop_name = db.property_name(prop).unwrap_or("unknown").to_string();
+
+        let data_type = DataType::from_u16(prop.data_type);
+        let conv_type = DataType::from_u16(prop.conversion_type);
+
+        match (data_type, conv_type) {
+            (Some(DataType::Class), _) |
+            (Some(DataType::StrongPointer), _) |
+            (Some(DataType::WeakPointer), _) |
+            (Some(DataType::Reference), _) => {
+                let target_struct = prop.struct_index as usize;
+                if target_struct < struct_defs.len() {
+                    let target_name = db.struct_name(target_struct).unwrap_or("Unknown").to_string();
+                    refs.push(StructTypeReference {
+                        property_name: prop_name,
+                        target_type: StructRefTarget::Struct { name: target_name, index: target_struct },
+                        is_array: false,
+                    });
                 }
             }
+            (Some(DataType::EnumChoice), _) | (_, Some(DataType::EnumChoice)) => {
+                let target_enum = prop.struct_index as usize;
+                if target_enum < db.enum_definitions().len() {
+                    let target_name = db.enum_name(target_enum).unwrap_or("Unknown").to_string();
+                    refs.push(StructTypeReference {
+                        property_name: prop_name,
+                        target_type: StructRefTarget::Enum { name: target_name, index: target_enum },
+                        is_array: false,
+                    });
+                }
+            }
+            _ => {}
         }
     }
+
+    refs
 }
 
 /// Extract references from a record's properties
 fn extract_references(
     db: &Arc<svarog::datacore::DataCoreDatabase>,
     record: &svarog::datacore::structs::DataCoreRecord,
+    reference_index: &Option<Arc<ReferenceIndex>>,
 ) -> Vec<RecordReference> {
     use svarog::datacore::Value;
 
@@ -1267,32 +1163,47 @@ fn extract_references(
     // Build a map of record indices for quick lookup
     let main_records: Vec<_> = db.main_records().collect();
 
+    // Use the GUID map from reference index if available, otherwise build a local one
+    let guid_map: std::collections::HashMap<String, usize> = if let Some(ref_idx) = reference_index {
+        ref_idx.guid_to_index.clone()
+    } else {
+        main_records.iter().enumerate()
+            .map(|(idx, r)| (format!("{}", r.id), idx))
+            .collect()
+    };
+
+    // Build instance map for pointer lookups
+    let instance_map: std::collections::HashMap<(u32, u32), usize> = main_records.iter().enumerate()
+        .map(|(idx, r)| ((r.struct_index as u32, r.instance_index as u32), idx))
+        .collect();
+
     for prop in instance.properties() {
         match &prop.value {
             Value::Reference(Some(record_ref)) => {
-                // Look up the referenced record by GUID
-                if let Some(target_record) = db.get_record(&record_ref.guid) {
+                let guid_str = format!("{}", record_ref.guid);
+                let target_idx = guid_map.get(&guid_str).copied();
+
+                if let Some(idx) = target_idx {
+                    let target_record = main_records[idx];
                     let target_name = db.record_name(target_record).unwrap_or("Unknown").to_string();
                     let target_type = db.struct_name(target_record.struct_index as usize).unwrap_or("Unknown").to_string();
-                    // Find index in main_records (for navigation)
-                    let target_idx = main_records.iter().position(|r| r.id == record_ref.guid);
 
                     refs.push(RecordReference {
                         property_name: prop.name.to_string(),
                         ref_type: ReferenceType::Reference,
                         target_name,
                         target_type,
-                        target_guid: format!("{}", record_ref.guid),
-                        target_record_index: target_idx,
+                        target_guid: guid_str,
+                        target_record_index: Some(idx),
                     });
                 } else {
                     // Record not found - show GUID
                     refs.push(RecordReference {
                         property_name: prop.name.to_string(),
                         ref_type: ReferenceType::Reference,
-                        target_name: format!("{}", record_ref.guid),
+                        target_name: guid_str.clone(),
                         target_type: "Unknown (not in DB)".to_string(),
-                        target_guid: format!("{}", record_ref.guid),
+                        target_guid: guid_str,
                         target_record_index: None,
                     });
                 }
@@ -1302,11 +1213,7 @@ fn extract_references(
                 let ptr_instance_index = instance_ref.instance_index;
 
                 let target_type = db.struct_name(ptr_struct_index as usize).unwrap_or("Unknown").to_string();
-
-                // Try to find a record that matches this instance
-                let target_idx = main_records.iter().position(|r| {
-                    r.struct_index as u32 == ptr_struct_index && r.instance_index as u32 == ptr_instance_index
-                });
+                let target_idx = instance_map.get(&(ptr_struct_index, ptr_instance_index)).copied();
 
                 let target_name = if let Some(idx) = target_idx {
                     db.record_name(main_records[idx]).unwrap_or("Unknown").to_string()
@@ -1328,11 +1235,7 @@ fn extract_references(
                 let ptr_instance_index = instance_ref.instance_index;
 
                 let target_type = db.struct_name(ptr_struct_index as usize).unwrap_or("Unknown").to_string();
-
-                // Try to find a record that matches this instance
-                let target_idx = main_records.iter().position(|r| {
-                    r.struct_index as u32 == ptr_struct_index && r.instance_index as u32 == ptr_instance_index
-                });
+                let target_idx = instance_map.get(&(ptr_struct_index, ptr_instance_index)).copied();
 
                 let target_name = if let Some(idx) = target_idx {
                     db.record_name(main_records[idx]).unwrap_or("Unknown").to_string()
@@ -1356,7 +1259,7 @@ fn extract_references(
                     match array_ref.element_type {
                         ArrayElementType::Reference => {
                             // Try to expand array and show individual references
-                            let items = expand_reference_array(db, array_ref, &main_records);
+                            let items = expand_reference_array(db, array_ref, &guid_map, &main_records);
                             if items.is_empty() {
                                 refs.push(RecordReference {
                                     property_name: prop.name.to_string(),
@@ -1389,7 +1292,7 @@ fn extract_references(
 
                             // Try to expand pointer arrays (up to 10 items)
                             if array_ref.count <= 10 {
-                                let items = expand_pointer_array(db, array_ref, &main_records);
+                                let items = expand_pointer_array(db, array_ref, &instance_map, &main_records);
                                 if !items.is_empty() {
                                     for (i, (name, type_name, idx)) in items.into_iter().enumerate() {
                                         refs.push(RecordReference {
@@ -1468,6 +1371,7 @@ fn extract_incoming_references(
 fn expand_reference_array(
     db: &Arc<svarog::datacore::DataCoreDatabase>,
     array_ref: &svarog::datacore::ArrayRef,
+    guid_map: &std::collections::HashMap<String, usize>,
     main_records: &[&svarog::datacore::structs::DataCoreRecord],
 ) -> Vec<(String, String, Option<usize>)> {
     let mut items = Vec::new();
@@ -1480,13 +1384,14 @@ fn expand_reference_array(
     for i in 0..array_ref.count {
         let idx = array_ref.first_index as usize + i as usize;
         if let Some(ref_val) = db.reference_value(idx) {
-            if let Some(target_record) = db.get_record(&ref_val.record_id) {
+            let guid_str = format!("{}", ref_val.record_id);
+            if let Some(&target_idx) = guid_map.get(&guid_str) {
+                let target_record = main_records[target_idx];
                 let target_name = db.record_name(target_record).unwrap_or("Unknown").to_string();
                 let target_type = db.struct_name(target_record.struct_index as usize).unwrap_or("Unknown").to_string();
-                let target_idx = main_records.iter().position(|r| r.id == ref_val.record_id);
-                items.push((target_name, target_type, target_idx));
+                items.push((target_name, target_type, Some(target_idx)));
             } else {
-                items.push((format!("{}", ref_val.record_id), "Unknown".to_string(), None));
+                items.push((guid_str, "Unknown".to_string(), None));
             }
         }
     }
@@ -1500,6 +1405,7 @@ fn expand_reference_array(
 fn expand_pointer_array(
     db: &Arc<svarog::datacore::DataCoreDatabase>,
     array_ref: &svarog::datacore::ArrayRef,
+    instance_map: &std::collections::HashMap<(u32, u32), usize>,
     main_records: &[&svarog::datacore::structs::DataCoreRecord],
 ) -> Vec<(String, String, Option<usize>)> {
     use svarog::datacore::ArrayElementType;
@@ -1525,14 +1431,10 @@ fn expand_pointer_array(
         };
 
         if let Some(ptr) = ptr {
-            // Copy packed struct fields to avoid alignment issues
-            let ptr_struct_index = ptr.struct_index;
+            // Copy fields from packed struct to avoid alignment issues
             let ptr_instance_index = ptr.instance_index;
-
-            // Try to find a record that matches this instance
-            let target_idx = main_records.iter().position(|r| {
-                r.struct_index as i32 == ptr_struct_index && r.instance_index as i32 == ptr_instance_index
-            });
+            let key = (ptr.struct_index as u32, ptr_instance_index as u32);
+            let target_idx = instance_map.get(&key).copied();
 
             if let Some(record_idx) = target_idx {
                 let record = main_records[record_idx];
@@ -1807,29 +1709,9 @@ fn export_current(db: &Arc<svarog::datacore::DataCoreDatabase>, state: &mut AppS
 fn export_all(db: &Arc<svarog::datacore::DataCoreDatabase>, state: &mut AppState) -> Result<(), String> {
     match state.datacore_page {
         DataCorePage::Structs => {
-            let all: Vec<usize> = (0..db.struct_definitions().len()).collect();
-            let (order, enums) = topo_structs_with_enums(db, &all);
-            let mut buf = String::new();
-            for e in &enums {
-                if let Some(name) = db.enum_name(*e) {
-                    let _ = writeln!(buf, "enum {};", name);
-                }
-            }
-            for s in &order {
-                if let Some(name) = db.struct_name(*s) {
-                    let _ = writeln!(buf, "struct {};", name);
-                }
-            }
-            buf.push('\n');
-            for e in enums {
-                buf.push_str(&generate_enum_preview(db, e));
-                buf.push('\n');
-            }
-            for idx in order {
-                buf.push_str(&render_struct(db, idx));
-                buf.push('\n');
-            }
-            if let Some(path) = rfd::FileDialog::new().set_file_name("structs.txt").save_file() {
+            let exporter = svarog::datacore::CHeaderExporter::new(db);
+            let buf = exporter.export_all();
+            if let Some(path) = rfd::FileDialog::new().set_file_name("structs.h").save_file() {
                 std::fs::write(&path, buf).map_err(|e| e.to_string())
             } else {
                 Ok(())

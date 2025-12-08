@@ -17,6 +17,7 @@ pub enum WorkerMessage {
     DataCoreLoaded(Result<Arc<DataCoreDatabase>, String>),
     DataCoreProgress { current: usize, total: usize },
     ReferenceIndexReady(Arc<ReferenceIndex>),
+    StructReferenceIndexReady(Arc<StructReferenceIndex>),
     ExtractionProgress { current: usize, total: usize, current_file: String },
     ExtractionComplete(Result<(), String>),
     FilePreviewReady(PreviewData),
@@ -192,12 +193,47 @@ pub struct IncomingReference {
     pub source_record_index: usize,
 }
 
+/// A reference from one struct to another type (outgoing)
+#[derive(Debug, Clone)]
+pub struct StructTypeReference {
+    pub property_name: String,
+    pub target_type: StructRefTarget,
+    pub is_array: bool,
+}
+
+/// Target of a struct reference
+#[derive(Debug, Clone)]
+pub enum StructRefTarget {
+    Struct { name: String, index: usize },
+    Enum { name: String, index: usize },
+}
+
+/// An incoming reference to a struct (from another struct's property)
+#[derive(Debug, Clone)]
+pub struct IncomingStructReference {
+    pub source_name: String,
+    pub source_index: usize,
+    pub property_name: String,
+    pub is_array: bool,
+}
+
 /// Index mapping record indices to their incoming references
 /// Built once when DCB is loaded for fast lookups
 #[derive(Debug, Clone)]
 pub struct ReferenceIndex {
     /// Maps target record index -> list of (source_record_index, property_name, ref_type)
     pub incoming: std::collections::HashMap<usize, Vec<(usize, String, ReferenceType)>>,
+    /// Maps GUID string -> main record index for fast lookups
+    pub guid_to_index: std::collections::HashMap<String, usize>,
+}
+
+/// Index mapping struct indices to their type references
+#[derive(Debug, Clone)]
+pub struct StructReferenceIndex {
+    /// Maps struct index -> list of structs that reference it
+    pub incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>>,
+    /// Maps enum index -> list of structs that reference it
+    pub enum_incoming: std::collections::HashMap<usize, Vec<IncomingStructReference>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +331,9 @@ pub struct AppState {
     pub record_references: Vec<RecordReference>,
     pub incoming_references: Vec<IncomingReference>,
     pub reference_index: Option<std::sync::Arc<ReferenceIndex>>,
+    pub struct_reference_index: Option<std::sync::Arc<StructReferenceIndex>>,
+    pub struct_outgoing_refs: Vec<StructTypeReference>,
+    pub struct_incoming_refs: Vec<IncomingStructReference>,
     pub references_expanded: bool,
     pub incoming_expanded: bool,
     pub navigation_history: Vec<usize>,
@@ -348,6 +387,9 @@ impl AppState {
             record_references: Vec::new(),
             incoming_references: Vec::new(),
             reference_index: None,
+            struct_reference_index: None,
+            struct_outgoing_refs: Vec::new(),
+            struct_incoming_refs: Vec::new(),
             references_expanded: true,
             incoming_expanded: true,
             navigation_history: Vec::new(),
@@ -415,6 +457,9 @@ impl AppState {
                 }
                 WorkerMessage::ReferenceIndexReady(index) => {
                     self.reference_index = Some(index);
+                }
+                WorkerMessage::StructReferenceIndexReady(index) => {
+                    self.struct_reference_index = Some(index);
                 }
                 WorkerMessage::DataCoreProgress { current, total } => {
                     self.datacore_progress = (current, total);
@@ -619,6 +664,8 @@ impl AppState {
     }
 
     /// Build the reference index for fast incoming reference lookups
+    /// Note: This is deprecated in favor of the worker-based build_reference_index
+    #[allow(dead_code)]
     fn build_reference_index(&mut self) {
         use svarog::datacore::{Value, ArrayElementType};
 
@@ -626,8 +673,22 @@ impl AppState {
 
         let mut incoming: std::collections::HashMap<usize, Vec<(usize, String, ReferenceType)>> =
             std::collections::HashMap::new();
+        let mut guid_to_index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         let main_records: Vec<_> = db.main_records().collect();
+
+        // Build GUID -> index map
+        for (idx, record) in main_records.iter().enumerate() {
+            guid_to_index.insert(format!("{}", record.id), idx);
+        }
+
+        // Build instance -> index map
+        let mut instance_to_index: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        for (idx, record) in main_records.iter().enumerate() {
+            instance_to_index.insert((record.struct_index as u32, record.instance_index as u32), idx);
+        }
 
         for (source_idx, record) in main_records.iter().enumerate() {
             let instance = db.instance(record.struct_index as u32, record.instance_index as u32);
@@ -635,8 +696,8 @@ impl AppState {
             for prop in instance.properties() {
                 match &prop.value {
                     Value::Reference(Some(record_ref)) => {
-                        // Find the target record index
-                        if let Some(target_idx) = main_records.iter().position(|r| r.id == record_ref.guid) {
+                        let guid_str = format!("{}", record_ref.guid);
+                        if let Some(&target_idx) = guid_to_index.get(&guid_str) {
                             incoming
                                 .entry(target_idx)
                                 .or_default()
@@ -644,12 +705,8 @@ impl AppState {
                         }
                     }
                     Value::StrongPointer(Some(instance_ref)) => {
-                        let ptr_struct_index = instance_ref.struct_index;
-                        let ptr_instance_index = instance_ref.instance_index;
-
-                        if let Some(target_idx) = main_records.iter().position(|r| {
-                            r.struct_index as u32 == ptr_struct_index && r.instance_index as u32 == ptr_instance_index
-                        }) {
+                        let key = (instance_ref.struct_index, instance_ref.instance_index);
+                        if let Some(&target_idx) = instance_to_index.get(&key) {
                             incoming
                                 .entry(target_idx)
                                 .or_default()
@@ -657,12 +714,8 @@ impl AppState {
                         }
                     }
                     Value::WeakPointer(Some(instance_ref)) => {
-                        let ptr_struct_index = instance_ref.struct_index;
-                        let ptr_instance_index = instance_ref.instance_index;
-
-                        if let Some(target_idx) = main_records.iter().position(|r| {
-                            r.struct_index as u32 == ptr_struct_index && r.instance_index as u32 == ptr_instance_index
-                        }) {
+                        let key = (instance_ref.struct_index, instance_ref.instance_index);
+                        if let Some(&target_idx) = instance_to_index.get(&key) {
                             incoming
                                 .entry(target_idx)
                                 .or_default()
@@ -676,7 +729,8 @@ impl AppState {
                                     for i in 0..array_ref.count.min(100) {
                                         let idx = array_ref.first_index as usize + i as usize;
                                         if let Some(ref_val) = db.reference_value(idx) {
-                                            if let Some(target_idx) = main_records.iter().position(|r| r.id == ref_val.record_id) {
+                                            let guid_str = format!("{}", ref_val.record_id);
+                                            if let Some(&target_idx) = guid_to_index.get(&guid_str) {
                                                 incoming
                                                     .entry(target_idx)
                                                     .or_default()
@@ -701,12 +755,8 @@ impl AppState {
                                         };
 
                                         if let Some(ptr) = ptr {
-                                            let ptr_struct_index = ptr.struct_index;
-                                            let ptr_instance_index = ptr.instance_index;
-
-                                            if let Some(target_idx) = main_records.iter().position(|r| {
-                                                r.struct_index as i32 == ptr_struct_index && r.instance_index as i32 == ptr_instance_index
-                                            }) {
+                                            let key = (ptr.struct_index as u32, ptr.instance_index as u32);
+                                            if let Some(&target_idx) = instance_to_index.get(&key) {
                                                 incoming
                                                     .entry(target_idx)
                                                     .or_default()
@@ -724,6 +774,6 @@ impl AppState {
             }
         }
 
-        self.reference_index = Some(std::sync::Arc::new(ReferenceIndex { incoming }));
+        self.reference_index = Some(std::sync::Arc::new(ReferenceIndex { incoming, guid_to_index }));
     }
 }

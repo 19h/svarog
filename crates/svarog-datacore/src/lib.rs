@@ -162,6 +162,7 @@
 //! ```
 
 mod builder;
+mod c_header;
 mod database;
 mod error;
 mod instance;
@@ -183,6 +184,7 @@ pub use value::{ArrayElementType, ArrayRef, InstanceRef, RecordRef, Value};
 pub use builder::{DataCoreBuilder, EnumHandle, RecordHandle, StructHandle};
 
 // Export types
+pub use c_header::{CHeaderExporter, C_HEADER_PREAMBLE};
 pub use export::{RecordWalker, XmlExporter};
 
 // Low-level types

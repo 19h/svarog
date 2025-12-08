@@ -217,6 +217,17 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+
+    /// Export DataCore schema as a C header file
+    DcbSchema {
+        /// Path to the DCB file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output C header file
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -261,6 +272,9 @@ fn main() -> Result<()> {
         }
         Commands::DdsMerge { input, output } => {
             cmd_dds_merge(&input, &output)?;
+        }
+        Commands::DcbSchema { input, output } => {
+            cmd_dcb_schema(&input, &output)?;
         }
     }
 
@@ -1118,6 +1132,39 @@ fn cmd_dds_merge(input: &PathBuf, output: &PathBuf) -> Result<()> {
     fs::write(output, merged).context("Failed to write output file")?;
 
     println!("Merge complete");
+
+    Ok(())
+}
+
+fn cmd_dcb_schema(input: &PathBuf, output: &PathBuf) -> Result<()> {
+    use svarog::datacore::CHeaderExporter;
+
+    println!("Loading DataCore: {}", input.display());
+
+    let start = Instant::now();
+    let data = fs::read(input).context("Failed to read input file")?;
+    let db = DataCoreDatabase::parse(&data).context("Failed to parse DataCore")?;
+
+    println!(
+        "Loaded in {:?}: {} structs, {} enums",
+        start.elapsed(),
+        db.struct_definitions().len(),
+        db.enum_definitions().len()
+    );
+
+    println!("Generating C header schema...");
+
+    let exporter = CHeaderExporter::new(&db);
+    let header = exporter.export_all();
+
+    fs::write(output, &header).context("Failed to write output file")?;
+
+    println!(
+        "Exported {} structs and {} enums to {}",
+        db.struct_definitions().len(),
+        db.enum_definitions().len(),
+        output.display()
+    );
 
     Ok(())
 }
