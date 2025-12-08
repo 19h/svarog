@@ -75,7 +75,7 @@ impl eframe::App for SvarogApp {
 
                 ui.menu_button("Help", |ui| {
                     if ui.button("About").clicked() {
-                        // Could show about dialog
+                        self.state.about_open = true;
                         ui.close_menu();
                     }
                 });
@@ -142,6 +142,32 @@ impl eframe::App for SvarogApp {
                 ActiveTab::DataCoreBrowser => DataCoreBrowserPanel::show(ui, &mut self.state),
             }
         });
+
+        if self.state.about_open {
+            egui::Window::new("About Svarog")
+                .collapsible(false)
+                .resizable(false)
+                .min_width(320.0)
+                .max_width(360.0)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(
+"┏━┓╻ ╻┏━┓┏━┓┏━┓┏━╸
+┗━┓┃┏┛┣━┫┣┳┛┃ ┃┃╺┓
+┗━┛┗┛ ╹ ╹╹┗╸┗━┛┗━┛"
+                            )
+                            .monospace()
+                        );
+                        ui.separator();
+                        ui.label(RichText::new("Dear CIG, you created this exploit.").monospace());
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            self.state.about_open = false;
+                        }
+                    });
+                });
+        }
 
         // Extraction dialog
         ExtractionDialog::show(ctx, &mut self.state);

@@ -144,6 +144,33 @@ impl DataCoreRecordNode {
     }
 }
 
+/// DataCore struct type for tree display
+#[derive(Debug, Clone)]
+pub struct DataCoreTypeNode {
+    pub name: String,
+    pub struct_index: Option<usize>,
+    pub children: Vec<DataCoreTypeNode>,
+    pub expanded: bool,
+}
+
+impl DataCoreTypeNode {
+    pub fn new(name: String, struct_index: Option<usize>) -> Self {
+        Self {
+            name,
+            struct_index,
+            children: Vec::new(),
+            expanded: false,
+        }
+    }
+
+    pub fn sort_children(&mut self) {
+        self.children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        for child in &mut self.children {
+            child.sort_children();
+        }
+    }
+}
+
 /// A reference from one record to another (outgoing)
 #[derive(Debug, Clone)]
 pub struct RecordReference {
@@ -224,6 +251,15 @@ pub enum ActiveTab {
     DataCoreBrowser,
 }
 
+/// Active page within the DataCore browser
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataCorePage {
+    #[default]
+    Records,
+    Structs,
+    Enums,
+}
+
 /// Main application state
 pub struct AppState {
     // Current tab
@@ -247,9 +283,14 @@ pub struct AppState {
     pub datacore_loading: bool,
     pub datacore_progress: (usize, usize),
     pub datacore_tree: Option<DataCoreRecordNode>,
+    pub datacore_type_tree: Option<DataCoreTypeNode>,
     pub datacore_search: String,
     pub selected_record: Option<usize>,
+    pub selected_enum: Option<usize>,
+    pub selected_type: Option<usize>,
     pub record_xml: String,
+    pub enum_preview: String,
+    pub type_preview: String,
     pub type_filter: Option<String>,
     pub record_references: Vec<RecordReference>,
     pub incoming_references: Vec<IncomingReference>,
@@ -259,6 +300,8 @@ pub struct AppState {
     pub navigation_history: Vec<usize>,
     pub navigation_index: usize,
     pub selected_line: Option<usize>,
+    pub datacore_page: DataCorePage,
+    pub about_open: bool,
 
     // Extraction state
     pub extraction_options: ExtractionOptions,
@@ -293,9 +336,14 @@ impl AppState {
             datacore_loading: false,
             datacore_progress: (0, 0),
             datacore_tree: None,
+            datacore_type_tree: None,
             datacore_search: String::new(),
             selected_record: None,
+            selected_enum: None,
+            selected_type: None,
             record_xml: String::new(),
+            enum_preview: String::new(),
+            type_preview: String::new(),
             type_filter: None,
             record_references: Vec::new(),
             incoming_references: Vec::new(),
@@ -305,6 +353,8 @@ impl AppState {
             navigation_history: Vec::new(),
             navigation_index: 0,
             selected_line: None,
+            datacore_page: DataCorePage::default(),
+            about_open: false,
             extraction_options: ExtractionOptions::default(),
             extraction_dialog_open: false,
             extracting: false,
@@ -348,7 +398,15 @@ impl AppState {
                     match result {
                         Ok(db) => {
                             self.datacore = Some(db.clone());
+                            self.selected_record = None;
+                            self.selected_type = None;
+                            self.selected_enum = None;
+                            self.record_xml.clear();
+                            self.type_preview.clear();
+                            self.enum_preview.clear();
+                            self.datacore_page = DataCorePage::Records;
                             self.build_datacore_tree();
+                            self.build_datacore_type_tree();
                             // Build reference index in background
                             crate::worker::build_reference_index(db, self.worker_sender.clone());
                         }
@@ -502,6 +560,62 @@ impl AppState {
 
         root.sort_children();
         self.datacore_tree = Some(root);
+    }
+
+    /// Build DataCore type tree from struct definitions and inheritance
+    fn build_datacore_type_tree(&mut self) {
+        let Some(db) = &self.datacore else { return };
+        let defs = db.struct_definitions();
+
+        if defs.is_empty() {
+            self.datacore_type_tree = None;
+            return;
+        }
+
+        let names: Vec<String> = defs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                db.struct_name(i)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("Struct{}", i))
+            })
+            .collect();
+
+        let mut children_map: Vec<Vec<usize>> = vec![Vec::new(); defs.len()];
+        let mut roots = Vec::new();
+
+        for (idx, def) in defs.iter().enumerate() {
+            if def.parent_type_index >= 0 {
+                let parent = def.parent_type_index as usize;
+                if parent < defs.len() {
+                    children_map[parent].push(idx);
+                } else {
+                    roots.push(idx);
+                }
+            } else {
+                roots.push(idx);
+            }
+        }
+
+        fn build_node(
+            idx: usize,
+            names: &[String],
+            children_map: &[Vec<usize>],
+        ) -> DataCoreTypeNode {
+            let mut node = DataCoreTypeNode::new(names[idx].clone(), Some(idx));
+            for &child in &children_map[idx] {
+                node.children.push(build_node(child, names, children_map));
+            }
+            node
+        }
+
+        let mut root = DataCoreTypeNode::new("Types".to_string(), None);
+        for idx in roots {
+            root.children.push(build_node(idx, &names, &children_map));
+        }
+        root.sort_children();
+        self.datacore_type_tree = Some(root);
     }
 
     /// Build the reference index for fast incoming reference lookups
