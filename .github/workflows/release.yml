@@ -33,15 +33,15 @@ jobs:
             can_test: false
             skip_gui: true
 
-          # macOS x86_64 (use Intel runner)
+          # macOS x86_64 (cross-compile on Apple Silicon, no tests)
           - target: x86_64-apple-darwin
-            os: macos-26
+            os: macos-14
             name: svarog-macos-x86_64
-            can_test: true
+            can_test: false
 
           # macOS ARM64 (Apple Silicon runner)
           - target: aarch64-apple-darwin
-            os: macos-26
+            os: macos-14
             name: svarog-macos-aarch64
             can_test: true
 

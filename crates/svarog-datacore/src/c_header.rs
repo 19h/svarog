@@ -544,7 +544,8 @@ mod tests {
         assert!(C_HEADER_PREAMBLE.contains("dc_strong_ptr"));
         assert!(C_HEADER_PREAMBLE.contains("dc_weak_ptr"));
         assert!(C_HEADER_PREAMBLE.contains("dc_array"));
-        assert!(C_HEADER_PREAMBLE.contains("#include <stdint.h>"));
-        assert!(C_HEADER_PREAMBLE.contains("#include <stdbool.h>"));
+        // Preamble is self-contained with inline typedefs (for IDA compatibility)
+        assert!(C_HEADER_PREAMBLE.contains("typedef signed char int8_t"));
+        assert!(C_HEADER_PREAMBLE.contains("typedef unsigned char bool"));
     }
 }

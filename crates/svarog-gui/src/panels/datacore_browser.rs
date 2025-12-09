@@ -3,7 +3,7 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, Ui, Sense, Vec2, Key, CursorIcon};
 use std::sync::Arc;
 
-use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, NavigationEntry, RecordReference, ReferenceIndex, ReferenceType, StructRefTarget, StructTypeReference};
+use crate::state::{AppState, DataCorePage, DataCoreRecordNode, DataCoreTypeNode, IncomingReference, NavigationEntry, RecordReference, ReferenceIndex, ReferenceType, StructRefTarget, StructReferenceIndex, StructTypeReference};
 use crate::widgets::{progress_bar, search_box};
 use crate::worker;
 
@@ -448,6 +448,8 @@ impl DataCoreBrowserPanel {
                                     }
 
                                     let mut row_index = 0usize;
+                                    let struct_refs = state.struct_reference_index.as_ref().map(|r| r.as_ref());
+                                    let db = state.datacore.as_ref().map(|d| d.as_ref());
                                     for child in &mut tree.children {
                                         render_type_tree(
                                             ui,
@@ -457,6 +459,8 @@ impl DataCoreBrowserPanel {
                                             0,
                                             &mut row_index,
                                             &mut clicked_struct_from_tree,
+                                            struct_refs,
+                                            db,
                                         );
                                     }
                                 }
@@ -673,6 +677,8 @@ impl DataCoreBrowserPanel {
                             .show(&mut columns[0], |ui| {
                                 if let Some(db) = &state.datacore {
                                     let search = state.datacore_search.to_lowercase();
+                                    let struct_refs = state.struct_reference_index.as_ref();
+                                    let mut row_index = 0usize;
                                     for (idx, _def) in db.enum_definitions().iter().enumerate() {
                                         let name = db.enum_name(idx).unwrap_or("Unknown");
                                         if !search.is_empty() && !name.to_lowercase().contains(&search) {
@@ -680,7 +686,21 @@ impl DataCoreBrowserPanel {
                                         }
                                         let is_selected = state.selected_enum == Some(idx);
 
+                                        // Alternating background
+                                        let row_bg = if row_index % 2 == 1 {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 1)
+                                        } else {
+                                            Color32::TRANSPARENT
+                                        };
+                                        row_index += 1;
+
+                                        // Paint full-width background
+                                        let row_rect = ui.available_rect_before_wrap();
+                                        let row_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(row_rect.width(), 20.0));
+                                        ui.painter().rect_filled(row_rect, 0.0, row_bg);
+
                                         ui.horizontal(|ui| {
+                                            ui.set_min_height(20.0);
                                             ui.add_space(16.0);
                                             ui.label(RichText::new("[E]").color(Color32::from_rgb(220, 180, 120)).small().monospace());
                                             let text = RichText::new(name)
@@ -690,6 +710,19 @@ impl DataCoreBrowserPanel {
                                                 .on_hover_cursor(CursorIcon::Default);
                                             if resp.clicked() {
                                                 clicked_enum = Some(idx);
+                                            }
+
+                                            // Show incoming reference count on the right
+                                            if let Some(refs) = struct_refs {
+                                                let in_count = refs.enum_incoming.get(&idx).map_or(0, |v| v.len());
+                                                if in_count > 0 {
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.add_space(8.0);
+                                                        ui.label(RichText::new(format!("{}", in_count)).monospace().small().color(Color32::from_gray(120)));
+                                                        ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
+                                                        ui.label(RichText::new("IN").monospace().small().color(Color32::from_gray(80)));
+                                                    });
+                                                }
                                             }
                                         });
                                     }
@@ -1072,6 +1105,8 @@ fn render_type_tree(
     depth: usize,
     row_index: &mut usize,
     clicked_struct: &mut Option<usize>,
+    struct_refs: Option<&StructReferenceIndex>,
+    db: Option<&svarog::datacore::DataCoreDatabase>,
 ) {
     let show_node = if search.is_empty() {
         true
@@ -1086,9 +1121,21 @@ fn render_type_tree(
     let is_selected = node.struct_index.is_some()
         && selected.map_or(false, |idx| Some(idx) == node.struct_index);
 
+    // Alternating background
+    let row_bg = if *row_index % 2 == 1 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 1)
+    } else {
+        Color32::TRANSPARENT
+    };
     *row_index += 1;
 
+    // Paint full-width background
+    let row_rect = ui.available_rect_before_wrap();
+    let row_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(row_rect.width(), 20.0));
+    ui.painter().rect_filled(row_rect, 0.0, row_bg);
+
     ui.horizontal(|ui| {
+        ui.set_min_height(20.0);
         let indent = depth as f32 * 32.0;
         if depth > 0 {
             let rect = ui.available_rect_before_wrap();
@@ -1145,13 +1192,88 @@ fn render_type_tree(
                 *clicked_struct = Some(idx);
             }
         }
+
+        // Reference counts on the right
+        if let Some(struct_idx) = node.struct_index {
+            if let (Some(refs), Some(database)) = (struct_refs, db) {
+                // Get incoming struct count
+                let in_struct_count = refs.incoming.get(&struct_idx).map_or(0, |v| v.len());
+
+                // Get outgoing counts
+                let (out_struct_count, out_enum_count) = count_outgoing_refs(database, struct_idx);
+
+                if in_struct_count > 0 || out_struct_count > 0 || out_enum_count > 0 {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
+                        if out_enum_count > 0 {
+                            ui.label(RichText::new(format!("{}", out_enum_count)).monospace().small().color(Color32::from_gray(120)));
+                            ui.label(RichText::new("[E]").color(Color32::from_rgb(220, 180, 120)).small().monospace());
+                        }
+                        if out_struct_count > 0 {
+                            ui.label(RichText::new(format!("{}", out_struct_count)).monospace().small().color(Color32::from_gray(120)));
+                            ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
+                        }
+                        if out_struct_count > 0 || out_enum_count > 0 {
+                            ui.label(RichText::new("OUT").monospace().small().color(Color32::from_gray(80)));
+                        }
+                        if in_struct_count > 0 {
+                            ui.label(RichText::new(format!("{}", in_struct_count)).monospace().small().color(Color32::from_gray(120)));
+                            ui.label(RichText::new("[S]").color(Color32::from_rgb(180, 220, 140)).small().monospace());
+                            ui.label(RichText::new("IN").monospace().small().color(Color32::from_gray(80)));
+                        }
+                    });
+                }
+            }
+        }
     });
 
     if node.expanded {
         for child in &mut node.children {
-            render_type_tree(ui, child, search, selected, depth + 1, row_index, clicked_struct);
+            render_type_tree(ui, child, search, selected, depth + 1, row_index, clicked_struct, struct_refs, db);
         }
     }
+}
+
+/// Count outgoing struct and enum references for a struct
+fn count_outgoing_refs(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> (usize, usize) {
+    use svarog::datacore::DataType;
+
+    let mut struct_count = 0;
+    let mut enum_count = 0;
+    let struct_defs = db.struct_definitions();
+    let prop_defs = db.property_definitions();
+
+    if struct_index >= struct_defs.len() {
+        return (0, 0);
+    }
+
+    let struct_def = &struct_defs[struct_index];
+    let first_attr = struct_def.first_attribute_index as usize;
+    let attr_count = struct_def.attribute_count as usize;
+
+    for prop_idx in first_attr..(first_attr + attr_count) {
+        if prop_idx >= prop_defs.len() {
+            break;
+        }
+        let prop = &prop_defs[prop_idx];
+        let data_type = DataType::from_u16(prop.data_type);
+        let conv_type = DataType::from_u16(prop.conversion_type);
+
+        match (data_type, conv_type) {
+            (Some(DataType::Class), _) |
+            (Some(DataType::StrongPointer), _) |
+            (Some(DataType::WeakPointer), _) |
+            (Some(DataType::Reference), _) => {
+                struct_count += 1;
+            }
+            (Some(DataType::EnumChoice), _) | (_, Some(DataType::EnumChoice)) => {
+                enum_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    (struct_count, enum_count)
 }
 
 fn generate_struct_preview(db: &svarog::datacore::DataCoreDatabase, struct_index: usize) -> String {
@@ -1590,7 +1712,18 @@ fn render_record_tree(
         && node.record_index.is_some()
         && selected.as_ref().map_or(false, |s| Some(*s) == node.record_index);
 
+    // Alternating background
+    let row_bg = if *row_index % 2 == 1 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 1)
+    } else {
+        Color32::TRANSPARENT
+    };
     *row_index += 1;
+
+    // Paint full-width background
+    let row_rect = ui.available_rect_before_wrap();
+    let row_rect = egui::Rect::from_min_size(row_rect.min, egui::vec2(row_rect.width(), 20.0));
+    ui.painter().rect_filled(row_rect, 0.0, row_bg);
 
     ui.horizontal(|ui| {
                 let indent = depth as f32 * 16.0;
