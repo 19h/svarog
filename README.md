@@ -14,6 +14,7 @@ A high-performance Rust library and CLI for extracting and parsing Star Citizen 
   - DOM-like Instance API for property access
   - DataCoreBuilder for creating/modifying databases
   - XML export with all properties resolved
+  - C header export for structs/enums (IDA-compatible, self-contained)
 - **CryXmlB Read/Write** - Full round-trip support for binary XML files
   - Parse `.mtl`, `.cdf`, `.chrparams`, `.adb`, `.animevents`, `.bspace`, `.xml`
   - Convert to/from standard XML text
@@ -35,11 +36,11 @@ Pre-built binaries are available in [Releases](https://github.com/19h/svarog/rel
 
 | Platform | Architectures |
 |----------|---------------|
-| Linux | x86_64 |
+| Linux | x86_64, ARM64 |
 | macOS | x86_64 (Intel), ARM64 (Apple Silicon) |
 | Windows | x86_64, ARM64 |
 
-> **Note:** Linux ARM64 builds include only the CLI due to cross-compilation constraints.
+> **Note:** Linux ARM64 and Windows ARM64 builds include only the CLI due to cross-compilation constraints.
 
 ### GUI Features
 
@@ -50,14 +51,20 @@ Pre-built binaries are available in [Releases](https://github.com/19h/svarog/rel
 - Extract individual files or entire directories
 
 **DataCore Browser**
-- Browse all records organized by type hierarchy
-- Search records by name with real-time filtering
-- Filter by record type (click type badges to filter)
-- XML content viewer with line numbers and syntax highlighting
-- **Reference Navigation**: Click references to jump between related records
-- **Incoming References**: See which records reference the current one
-- **Outgoing References**: See which records the current one references
-- Navigation history with back/forward buttons
+- Three browsing modes: Records, Structs, and Enums
+- **Records View**: Browse all records organized by type hierarchy
+  - Search records by name with real-time filtering
+  - Filter by record type (click type badges to filter)
+  - XML content viewer with line numbers and syntax highlighting
+  - Reference navigation: click references to jump between related records
+  - Incoming/outgoing reference tracking with counts
+- **Structs View**: Browse C-style struct definitions
+  - Type reference counts showing usage across the database
+  - Export structs as C headers (IDA-compatible)
+- **Enums View**: Browse C-style enum definitions with usage counts
+- Navigation history with back/forward (mouse buttons, Alt+Left/Right)
+- Alternating row backgrounds (zebra striping) in all tree views
+- Text selection with non-copyable line numbers
 
 ## Performance
 
@@ -140,8 +147,11 @@ svarog dcb-extract -i Game.dcb -o ./datacore
 ### CryXmlB Conversion
 
 ```bash
-# Convert a single file
+# Convert CryXmlB to XML
 svarog cryxml-convert -i material.mtl -o material.xml
+
+# Convert XML back to CryXmlB
+svarog cryxml-create -i material.xml -o material.mtl
 
 # Convert all CryXmlB files in a directory
 svarog cryxml-convert-all -i ./extracted -o ./converted
@@ -252,6 +262,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Example: Exporting C Headers
+
+```rust
+use svarog_datacore::{DataCoreDatabase, CHeaderExporter};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let database = DataCoreDatabase::open("Game.dcb")?;
+    let exporter = CHeaderExporter::new(&database);
+
+    // Export all structs and enums to a single header file
+    let header = exporter.export_all();
+    std::fs::write("datacore_types.h", header)?;
+
+    // Or export specific structs by index
+    let partial = exporter.export_structs(&[0, 1, 2]);
+
+    Ok(())
+}
+```
+
+The generated headers are self-contained (no `#include` required) and compatible with IDA's type parser.
+
 ### Example: Using SIMD Utilities
 
 ```rust
@@ -276,10 +308,11 @@ let pos = simd::find_byte(0x50, &data);
 | `svarog` | Umbrella crate re-exporting all functionality |
 | `svarog-common` | Binary reading, CigGuid, CRC32C, **SIMD utilities** |
 | `svarog-p4k` | P4K archive reader (ZIP64 + AES + Zstd) |
-| `svarog-cryxml` | CryXmlB binary XML parser |
-| `svarog-datacore` | DCB database parser + XML export |
+| `svarog-cryxml` | CryXmlB binary XML parser + writer |
+| `svarog-datacore` | DCB database parser + XML/C header export |
 | `svarog-chf` | Character head file parser |
 | `svarog-dds` | DDS mipmap merger |
+| `svarog-gui` | GUI application (egui/eframe) |
 
 ## File Format Details
 
