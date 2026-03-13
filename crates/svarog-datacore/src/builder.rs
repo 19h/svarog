@@ -475,11 +475,12 @@ impl DataCoreBuilder {
         builder.reference_pool = ref_data
             .chunks_exact(20)
             .map(|c| {
+                let instance_index = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 let mut guid_bytes = [0u8; 16];
-                guid_bytes.copy_from_slice(&c[0..16]);
+                guid_bytes.copy_from_slice(&c[4..20]);
                 DataCoreReference {
+                    instance_index,
                     record_id: CigGuid::from_bytes(guid_bytes),
-                    instance_index: i32::from_le_bytes([c[16], c[17], c[18], c[19]]),
                 }
             })
             .collect();
@@ -797,13 +798,14 @@ impl DataCoreBuilder {
     /// Set a reference property (by GUID).
     pub fn set_reference(&mut self, record: RecordHandle, property: &str, target_guid: CigGuid) {
         let reference = DataCoreReference {
-            record_id: target_guid,
             instance_index: 0,
+            record_id: target_guid,
         };
 
         self.set_value(record, property, |offset, data| {
-            data[offset..offset + 16].copy_from_slice(reference.record_id.as_bytes());
-            data[offset + 16..offset + 20].copy_from_slice(&reference.instance_index.to_le_bytes());
+            // Binary layout: [instance_index:4][record_id:16]
+            data[offset..offset + 4].copy_from_slice(&reference.instance_index.to_le_bytes());
+            data[offset + 4..offset + 20].copy_from_slice(reference.record_id.as_bytes());
         });
     }
 
