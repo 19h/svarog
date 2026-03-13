@@ -578,12 +578,14 @@ impl<'a, W: Write> ExportContext<'a, W> {
         self.end_element(name)
     }
 
-    fn write_attribute_str(&mut self, _name: &str, _value: &str) -> Result<(), ExportError> {
-        // This is a bit tricky with quick-xml's streaming API.
-        // We need to write attributes before the element content.
-        // For now, we'll write them as child elements (not ideal but functional).
-        // A proper implementation would buffer the element and write it all at once.
-        Ok(())
+    /// Write a named value as a child element.
+    ///
+    /// UPSTREAM: Originally a no-op. Ideally these would be XML attributes on
+    /// the parent element, but quick-xml's streaming API requires attributes
+    /// before content. Writing as child elements is functionally equivalent
+    /// and ensures reference metadata (RecordId, RecordName, etc.) is emitted.
+    fn write_attribute_str(&mut self, name: &str, value: &str) -> Result<(), ExportError> {
+        self.write_element(name, value)
     }
 }
 
