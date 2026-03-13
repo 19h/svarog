@@ -26,7 +26,11 @@ pub struct Instance<'a> {
 impl<'a> Instance<'a> {
     /// Create a new instance view.
     #[inline]
-    pub(crate) fn new(database: &'a DataCoreDatabase, struct_index: u32, instance_index: u32) -> Self {
+    pub(crate) fn new(
+        database: &'a DataCoreDatabase,
+        struct_index: u32,
+        instance_index: u32,
+    ) -> Self {
         Self {
             database,
             struct_index,
@@ -62,7 +66,9 @@ impl<'a> Instance<'a> {
     ///
     /// Returns `None` if the property doesn't exist.
     pub fn get(&self, name: &str) -> Option<Value<'a>> {
-        let properties = self.database.get_struct_properties(self.struct_index as usize);
+        let properties = self
+            .database
+            .get_struct_properties(self.struct_index as usize);
         let mut reader = self
             .database
             .get_instance_reader(self.struct_index as usize, self.instance_index as usize);
@@ -88,7 +94,9 @@ impl<'a> Instance<'a> {
 
     /// Check if this instance has a property with the given name.
     pub fn has_property(&self, name: &str) -> bool {
-        let properties = self.database.get_struct_properties(self.struct_index as usize);
+        let properties = self
+            .database
+            .get_struct_properties(self.struct_index as usize);
         properties.iter().any(|prop| {
             self.database
                 .property_name(prop)
@@ -103,9 +111,9 @@ impl<'a> Instance<'a> {
     /// or WeakPointer properties.
     pub fn get_instance(&self, name: &str) -> Option<Instance<'a>> {
         match self.get(name)? {
-            Value::Class(r) | Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => {
-                Some(Instance::new(self.database, r.struct_index, r.instance_index))
-            }
+            Value::Class(r) | Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(
+                Instance::new(self.database, r.struct_index, r.instance_index),
+            ),
             _ => None,
         }
     }
@@ -222,10 +230,12 @@ impl<'a> Instance<'a> {
                 Value::Enum(self.database.get_string(&string_id).unwrap_or(""))
             }
             DataType::Class => {
-                // For Class, we create an instance reference pointing to a nested read position
-                // The instance data is inline, so we need to track the current reader state
-                // and create an instance that reads from the same struct data
-                Value::Class(InstanceRef::new(struct_index, self.instance_index))
+                // For Class, we create an instance reference pointing to a nested read position.
+                // UPSTREAM: The inline class data must be skipped so the reader stays aligned
+                // for subsequent properties.
+                let value = Value::Class(InstanceRef::new(struct_index, self.instance_index));
+                self.skip_class(struct_index, reader);
+                value
             }
             DataType::StrongPointer => {
                 let pointer: DataCorePointer = reader.read_struct().ok()?;
@@ -494,7 +504,12 @@ impl<'a> Iterator for PropertyIterator<'a> {
 
         let value = if prop.conversion_type == 0 {
             // Single value
-            read_single_value(self.database, data_type, prop.struct_index as u32, &mut self.reader)?
+            read_single_value(
+                self.database,
+                data_type,
+                prop.struct_index as u32,
+                &mut self.reader,
+            )?
         } else {
             // Array
             let count = self.reader.read_i32().ok()? as u32;
@@ -562,9 +577,7 @@ impl<'a> Iterator for ArrayIterator<'a> {
         self.current_index += 1;
 
         Some(match self.array.element_type {
-            ArrayElementType::Bool => {
-                Value::Bool(self.database.bool_value(index).unwrap_or(false))
-            }
+            ArrayElementType::Bool => Value::Bool(self.database.bool_value(index).unwrap_or(false)),
             ArrayElementType::Int8 => Value::Int8(self.database.int8_value(index).unwrap_or(0)),
             ArrayElementType::Int16 => Value::Int16(self.database.int16_value(index).unwrap_or(0)),
             ArrayElementType::Int32 => Value::Int32(self.database.int32_value(index).unwrap_or(0)),
@@ -612,10 +625,9 @@ impl<'a> Iterator for ArrayIterator<'a> {
             ArrayElementType::Guid => {
                 Value::Guid(self.database.guid_value(index).unwrap_or_default())
             }
-            ArrayElementType::Class => Value::Class(InstanceRef::new(
-                self.array.struct_index,
-                index as u32,
-            )),
+            ArrayElementType::Class => {
+                Value::Class(InstanceRef::new(self.array.struct_index, index as u32))
+            }
             ArrayElementType::StrongPointer => {
                 let ptr = self.database.strong_value(index);
                 match ptr {
@@ -639,9 +651,7 @@ impl<'a> Iterator for ArrayIterator<'a> {
             ArrayElementType::Reference => {
                 let reference = self.database.reference_value(index);
                 match reference {
-                    Some(r) if !r.is_null() => {
-                        Value::Reference(Some(RecordRef::new(r.record_id)))
-                    }
+                    Some(r) if !r.is_null() => Value::Reference(Some(RecordRef::new(r.record_id))),
                     _ => Value::Reference(None),
                 }
             }
@@ -690,9 +700,11 @@ fn read_single_value<'a>(
             Value::Enum(database.get_string(&string_id).unwrap_or(""))
         }
         DataType::Class => {
-            // For inline classes, we need to track position differently
-            // This is complex - for now return a reference
-            Value::Class(InstanceRef::new(struct_index, 0))
+            // UPSTREAM: The inline class data must be skipped so the reader stays aligned
+            // for subsequent properties.
+            let value = Value::Class(InstanceRef::new(struct_index, 0));
+            skip_class_inline(database, struct_index, reader);
+            value
         }
         DataType::StrongPointer => {
             let pointer: DataCorePointer = reader.read_struct().ok()?;
@@ -748,5 +760,48 @@ fn data_type_to_array_element(data_type: DataType) -> ArrayElementType {
         DataType::StrongPointer => ArrayElementType::StrongPointer,
         DataType::WeakPointer => ArrayElementType::WeakPointer,
         DataType::Reference => ArrayElementType::Reference,
+    }
+}
+
+/// Skip past all inline data for a Class property in the byte stream.
+///
+/// UPSTREAM: This is the standalone equivalent of `Instance::skip_class()`,
+/// used by the standalone `read_single_value()` and `PropertyIterator`.
+/// Without this, the reader falls out of alignment after any inline Class
+/// property, causing all subsequent property reads to return garbage.
+fn skip_class_inline(
+    database: &DataCoreDatabase,
+    struct_index: u32,
+    reader: &mut BinaryReader<'_>,
+) {
+    let properties = database.get_struct_properties(struct_index as usize);
+    for prop in properties {
+        skip_property_inline(database, prop, reader);
+    }
+}
+
+/// Skip past a single property's inline data in the byte stream.
+///
+/// UPSTREAM: Standalone equivalent of `Instance::skip_property()`.
+fn skip_property_inline(
+    database: &DataCoreDatabase,
+    prop: &DataCorePropertyDefinition,
+    reader: &mut BinaryReader<'_>,
+) {
+    let data_type = match DataType::from_u16(prop.data_type) {
+        Some(dt) => dt,
+        None => return,
+    };
+
+    if prop.conversion_type == 0 {
+        // Single value
+        if data_type == DataType::Class {
+            skip_class_inline(database, prop.struct_index as u32, reader);
+        } else {
+            reader.advance(data_type.inline_size());
+        }
+    } else {
+        // Array — count (i32) + first_index (i32) = 8 bytes
+        reader.advance(8);
     }
 }
