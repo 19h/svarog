@@ -676,7 +676,7 @@ fn read_single_value<'a>(
             let start = reader.position();
             skip_class_inline(database, struct_index, reader);
             let end = reader.position();
-            let data = reader.sub_slice(start, end);
+            let data = reader.sub_slice(start, end)?;
             Value::Class { struct_index, data }
         }
         DataType::StrongPointer => {
