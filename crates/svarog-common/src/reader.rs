@@ -88,8 +88,6 @@ impl<'a> BinaryReader<'a> {
     }
 
     /// Get a sub-slice of the underlying data by absolute positions.
-    ///
-    /// UPSTREAM: Used to capture inline Class data from the reader's buffer.
     #[inline]
     pub fn sub_slice(&self, start: usize, end: usize) -> &'a [u8] {
         &self.data[start..end]

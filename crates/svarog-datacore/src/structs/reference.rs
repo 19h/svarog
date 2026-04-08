@@ -25,7 +25,7 @@ impl DataCorePointer {
 
 /// A reference to another record by GUID.
 ///
-/// UPSTREAM: Binary layout is `[instance_index:4][record_id:16]`, not
+/// Binary layout is `[instance_index:4][record_id:16]`, not
 /// `[record_id:16][instance_index:4]` as originally assumed. Verified
 /// against real Data.p4k — only the idx-first layout produces GUIDs
 /// that resolve to actual records.

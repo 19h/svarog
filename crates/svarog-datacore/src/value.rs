@@ -43,9 +43,9 @@ pub enum Value<'a> {
     Guid(CigGuid),
     /// Nested struct instance (inline class data).
     ///
-    /// UPSTREAM: Class properties embed their data inline within the parent
-    /// instance's byte stream. The `data` slice contains the raw bytes of the
-    /// inline class, which can be used to construct an Instance for reading.
+    /// Class properties embed their data inline within the parent instance's
+    /// byte stream. The `data` slice contains the raw bytes of the inline
+    /// class, which can be used to construct an Instance for reading.
     Class { struct_index: u32, data: &'a [u8] },
     /// Strong pointer to another instance.
     StrongPointer(Option<InstanceRef>),

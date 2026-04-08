@@ -17,9 +17,9 @@ use crate::{DataCoreDatabase, DataType};
 /// This provides access to the properties of a struct instance with type-safe
 /// value extraction. Instances are lightweight and borrow from the database.
 ///
-/// UPSTREAM: Instance now stores the raw data slice directly, allowing it to
-/// work with both regular instances (from the data block) and inline Class
-/// properties (embedded within a parent instance's byte stream).
+/// Instance now stores the raw data slice directly, allowing it to work with
+/// both regular instances (from the data block) and inline Class properties
+/// (embedded within a parent instance's byte stream).
 #[derive(Clone, Copy)]
 pub struct Instance<'a> {
     database: &'a DataCoreDatabase,
@@ -48,9 +48,9 @@ impl<'a> Instance<'a> {
 
     /// Create an instance view from inline class data.
     ///
-    /// UPSTREAM: Used when a Class property is encountered — the data is
-    /// embedded inline within the parent's byte stream rather than in a
-    /// separate instance data block.
+    /// Used when a Class property is encountered — the data is embedded
+    /// inline within the parent's byte stream rather than in a separate
+    /// instance data block.
     #[inline]
     pub fn from_inline_data(
         database: &'a DataCoreDatabase,
@@ -136,8 +136,8 @@ impl<'a> Instance<'a> {
     /// This is a convenience method for accessing nested Class, StrongPointer,
     /// or WeakPointer properties.
     ///
-    /// UPSTREAM: For Class properties, this correctly reads the inline data
-    /// from the parent's byte stream.
+    /// For Class properties, this reads the inline data from the parent's
+    /// byte stream.
     pub fn get_instance(&self, name: &str) -> Option<Instance<'a>> {
         match self.get(name)? {
             Value::Class { struct_index, data } => Some(Instance::from_inline_data(
@@ -583,7 +583,7 @@ impl<'a> Iterator for ArrayIterator<'a> {
                 Value::Guid(self.database.guid_value(index).unwrap_or_default())
             }
             ArrayElementType::Class => {
-                // UPSTREAM: Array Class elements are stored as separate instances in the
+                // Array Class elements are stored as separate instances in the
                 // data block, addressable by (struct_index, instance_index).
                 let data = self
                     .database
@@ -635,9 +635,9 @@ impl ExactSizeIterator for ArrayIterator<'_> {}
 
 /// Read a single property value from an inline byte stream.
 ///
-/// UPSTREAM: For `DataType::Class`, this captures the inline bytes from the
-/// reader and stores them in `Value::Class { data }`, enabling correct
-/// resolution when the value is later used to construct an Instance.
+/// For `DataType::Class`, this captures the inline bytes from the reader and
+/// stores them in `Value::Class { data }`, enabling correct resolution when
+/// the value is later used to construct an Instance.
 fn read_single_value<'a>(
     database: &'a DataCoreDatabase,
     data_type: DataType,
@@ -670,7 +670,7 @@ fn read_single_value<'a>(
             Value::Enum(database.get_string(&string_id).unwrap_or(""))
         }
         DataType::Class => {
-            // UPSTREAM: Capture the inline class data from the reader's byte stream.
+            // Capture the inline class data from the reader's byte stream.
             // The data starts at the current reader position and extends for the full
             // size of the class's properties (computed by skip_class_inline).
             let start = reader.position();
@@ -738,9 +738,8 @@ fn data_type_to_array_element(data_type: DataType) -> ArrayElementType {
 
 /// Skip past all inline data for a Class property in the byte stream.
 ///
-/// UPSTREAM: This is used to compute the size of inline class data and
-/// advance the reader past it. The reader position before/after this call
-/// defines the byte range of the inline class data.
+/// The reader position before/after this call defines the byte range of
+/// the inline class data.
 fn skip_class_inline(
     database: &DataCoreDatabase,
     struct_index: u32,
@@ -753,8 +752,6 @@ fn skip_class_inline(
 }
 
 /// Skip past a single property's inline data in the byte stream.
-///
-/// UPSTREAM: Standalone equivalent of `Instance::skip_property()`.
 fn skip_property_inline(
     database: &DataCoreDatabase,
     prop: &DataCorePropertyDefinition,
