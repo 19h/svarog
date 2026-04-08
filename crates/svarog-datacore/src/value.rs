@@ -47,6 +47,12 @@ pub enum Value<'a> {
     /// byte stream. The `data` slice contains the raw bytes of the inline
     /// class, which can be used to construct an Instance for reading.
     Class { struct_index: u32, data: &'a [u8] },
+    /// Lazy reference to a class instance in the data block.
+    ///
+    /// Used for array Class elements, which are stored as separate instances
+    /// addressable by (struct_index, instance_index). The data is not accessed
+    /// until the caller resolves the reference via `Instance::new()`.
+    ClassRef(InstanceRef),
     /// Strong pointer to another instance.
     StrongPointer(Option<InstanceRef>),
     /// Weak pointer to another instance.
@@ -231,25 +237,28 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// Try to get this value as an instance reference (for pointer types).
+    /// Try to get this value as an instance reference.
     ///
-    /// Note: This returns `None` for `Value::Class` since inline classes don't
-    /// have a valid InstanceRef. Use `Instance::get_instance()` to access
-    /// inline class data.
+    /// Returns `None` for inline `Value::Class` since those don't have a valid
+    /// InstanceRef. Use `Instance::get_instance()` to access inline class data.
     #[inline]
     pub fn as_instance(&self) -> Option<InstanceRef> {
         match self {
-            Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(*r),
+            Value::ClassRef(r)
+            | Value::StrongPointer(Some(r))
+            | Value::WeakPointer(Some(r)) => Some(*r),
             _ => None,
         }
     }
 
-    /// Get the struct_index for Class, StrongPointer, or WeakPointer values.
+    /// Get the struct_index for Class, ClassRef, StrongPointer, or WeakPointer values.
     #[inline]
     pub fn struct_index(&self) -> Option<u32> {
         match self {
             Value::Class { struct_index, .. } => Some(*struct_index),
-            Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(r.struct_index),
+            Value::ClassRef(r)
+            | Value::StrongPointer(Some(r))
+            | Value::WeakPointer(Some(r)) => Some(r.struct_index),
             _ => None,
         }
     }
@@ -291,6 +300,9 @@ impl std::fmt::Display for Value<'_> {
             Value::Guid(g) => write!(f, "{}", g),
             Value::Class { struct_index, data } => {
                 write!(f, "Class(struct={}, {} bytes)", struct_index, data.len())
+            }
+            Value::ClassRef(r) => {
+                write!(f, "ClassRef({}, {})", r.struct_index, r.instance_index)
             }
             Value::StrongPointer(Some(r)) => {
                 write!(f, "StrongPtr({}, {})", r.struct_index, r.instance_index)

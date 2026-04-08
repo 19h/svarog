@@ -145,7 +145,9 @@ impl<'a> Instance<'a> {
                 struct_index,
                 data,
             )),
-            Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(Instance::new(
+            Value::ClassRef(r)
+            | Value::StrongPointer(Some(r))
+            | Value::WeakPointer(Some(r)) => Some(Instance::new(
                 self.database,
                 r.struct_index,
                 r.instance_index,
@@ -582,17 +584,10 @@ impl<'a> Iterator for ArrayIterator<'a> {
             ArrayElementType::Guid => {
                 Value::Guid(self.database.guid_value(index).unwrap_or_default())
             }
-            ArrayElementType::Class => {
-                // Array Class elements are stored as separate instances in the
-                // data block, addressable by (struct_index, instance_index).
-                let data = self
-                    .database
-                    .get_instance_data(self.array.struct_index as usize, index);
-                Value::Class {
-                    struct_index: self.array.struct_index,
-                    data,
-                }
-            }
+            ArrayElementType::Class => Value::ClassRef(InstanceRef::new(
+                self.array.struct_index,
+                index as u32,
+            )),
             ArrayElementType::StrongPointer => {
                 let ptr = self.database.strong_value(index);
                 match ptr {
