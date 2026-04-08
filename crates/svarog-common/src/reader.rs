@@ -88,9 +88,11 @@ impl<'a> BinaryReader<'a> {
     }
 
     /// Get a sub-slice of the underlying data by absolute positions.
+    ///
+    /// Returns `None` if the range is out of bounds.
     #[inline]
-    pub fn sub_slice(&self, start: usize, end: usize) -> &'a [u8] {
-        &self.data[start..end]
+    pub fn sub_slice(&self, start: usize, end: usize) -> Option<&'a [u8]> {
+        self.data.get(start..end)
     }
 
     /// Peek at bytes without advancing the position.
