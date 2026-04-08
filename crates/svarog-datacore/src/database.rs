@@ -725,9 +725,8 @@ impl DataCoreDatabase {
 
     /// Get the raw byte slice for an instance's data.
     ///
-    /// UPSTREAM: This is the underlying data accessor used by both
-    /// `get_instance_reader()` and `Instance::new()`. It computes the
-    /// byte range for a specific instance within a struct type's data block.
+    /// This is the underlying data accessor used by both
+    /// `get_instance_reader()` and `Instance::new()`.
     pub fn get_instance_data(&self, struct_index: usize, instance_index: usize) -> &[u8] {
         let struct_offset = self.struct_offsets[struct_index];
         let struct_size = self.struct_definitions[struct_index].struct_size as usize;
