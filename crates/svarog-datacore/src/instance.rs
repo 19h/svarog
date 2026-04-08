@@ -16,25 +16,52 @@ use crate::{DataCoreDatabase, DataType};
 ///
 /// This provides access to the properties of a struct instance with type-safe
 /// value extraction. Instances are lightweight and borrow from the database.
+///
+/// UPSTREAM: Instance now stores the raw data slice directly, allowing it to
+/// work with both regular instances (from the data block) and inline Class
+/// properties (embedded within a parent instance's byte stream).
 #[derive(Clone, Copy)]
 pub struct Instance<'a> {
     database: &'a DataCoreDatabase,
     struct_index: u32,
     instance_index: u32,
+    /// The raw bytes of this instance's data.
+    data: &'a [u8],
 }
 
 impl<'a> Instance<'a> {
-    /// Create a new instance view.
+    /// Create a new instance view from a struct/instance index pair.
     #[inline]
     pub(crate) fn new(
         database: &'a DataCoreDatabase,
         struct_index: u32,
         instance_index: u32,
     ) -> Self {
+        let data = database.get_instance_data(struct_index as usize, instance_index as usize);
         Self {
             database,
             struct_index,
             instance_index,
+            data,
+        }
+    }
+
+    /// Create an instance view from inline class data.
+    ///
+    /// UPSTREAM: Used when a Class property is encountered — the data is
+    /// embedded inline within the parent's byte stream rather than in a
+    /// separate instance data block.
+    #[inline]
+    pub fn from_inline_data(
+        database: &'a DataCoreDatabase,
+        struct_index: u32,
+        data: &'a [u8],
+    ) -> Self {
+        Self {
+            database,
+            struct_index,
+            instance_index: 0,
+            data,
         }
     }
 
@@ -45,6 +72,7 @@ impl<'a> Instance<'a> {
     }
 
     /// Get the instance index within the struct type's data block.
+    /// Returns 0 for inline class instances.
     #[inline]
     pub fn instance_index(&self) -> u32 {
         self.instance_index
@@ -69,9 +97,7 @@ impl<'a> Instance<'a> {
         let properties = self
             .database
             .get_struct_properties(self.struct_index as usize);
-        let mut reader = self
-            .database
-            .get_instance_reader(self.struct_index as usize, self.instance_index as usize);
+        let mut reader = BinaryReader::new(self.data);
 
         for prop in properties {
             let prop_name = self.database.property_name(prop)?;
@@ -89,7 +115,7 @@ impl<'a> Instance<'a> {
 
     /// Iterate over all properties of this instance.
     pub fn properties(&self) -> PropertyIterator<'a> {
-        PropertyIterator::new(self.database, self.struct_index, self.instance_index)
+        PropertyIterator::from_data(self.database, self.struct_index, self.data)
     }
 
     /// Check if this instance has a property with the given name.
@@ -109,11 +135,21 @@ impl<'a> Instance<'a> {
     ///
     /// This is a convenience method for accessing nested Class, StrongPointer,
     /// or WeakPointer properties.
+    ///
+    /// UPSTREAM: For Class properties, this correctly reads the inline data
+    /// from the parent's byte stream.
     pub fn get_instance(&self, name: &str) -> Option<Instance<'a>> {
         match self.get(name)? {
-            Value::Class(r) | Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(
-                Instance::new(self.database, r.struct_index, r.instance_index),
-            ),
+            Value::Class { struct_index, data } => Some(Instance::from_inline_data(
+                self.database,
+                struct_index,
+                data,
+            )),
+            Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(Instance::new(
+                self.database,
+                r.struct_index,
+                r.instance_index,
+            )),
             _ => None,
         }
     }
@@ -177,13 +213,13 @@ impl<'a> Instance<'a> {
     fn read_property_value(
         &self,
         prop: &DataCorePropertyDefinition,
-        reader: &mut BinaryReader<'_>,
+        reader: &mut BinaryReader<'a>,
     ) -> Option<Value<'a>> {
         let data_type = DataType::from_u16(prop.data_type)?;
 
         if prop.conversion_type == 0 {
             // Single value
-            self.read_single_value(data_type, prop.struct_index as u32, reader)
+            read_single_value(self.database, data_type, prop.struct_index as u32, reader)
         } else {
             // Array
             let count = reader.read_i32().ok()? as u32;
@@ -198,78 +234,6 @@ impl<'a> Instance<'a> {
         }
     }
 
-    fn read_single_value(
-        &self,
-        data_type: DataType,
-        struct_index: u32,
-        reader: &mut BinaryReader<'_>,
-    ) -> Option<Value<'a>> {
-        Some(match data_type {
-            DataType::Boolean => Value::Bool(reader.read_bool().ok()?),
-            DataType::SByte => Value::Int8(reader.read_i8().ok()?),
-            DataType::Int16 => Value::Int16(reader.read_i16().ok()?),
-            DataType::Int32 => Value::Int32(reader.read_i32().ok()?),
-            DataType::Int64 => Value::Int64(reader.read_i64().ok()?),
-            DataType::Byte => Value::UInt8(reader.read_u8().ok()?),
-            DataType::UInt16 => Value::UInt16(reader.read_u16().ok()?),
-            DataType::UInt32 => Value::UInt32(reader.read_u32().ok()?),
-            DataType::UInt64 => Value::UInt64(reader.read_u64().ok()?),
-            DataType::Single => Value::Float(reader.read_f32().ok()?),
-            DataType::Double => Value::Double(reader.read_f64().ok()?),
-            DataType::Guid => Value::Guid(reader.read_struct().ok()?),
-            DataType::String => {
-                let string_id: DataCoreStringId = reader.read_struct().ok()?;
-                Value::String(self.database.get_string(&string_id).unwrap_or(""))
-            }
-            DataType::Locale => {
-                let string_id: DataCoreStringId = reader.read_struct().ok()?;
-                Value::Locale(self.database.get_string(&string_id).unwrap_or(""))
-            }
-            DataType::EnumChoice => {
-                let string_id: DataCoreStringId = reader.read_struct().ok()?;
-                Value::Enum(self.database.get_string(&string_id).unwrap_or(""))
-            }
-            DataType::Class => {
-                // For Class, we create an instance reference pointing to a nested read position.
-                // UPSTREAM: The inline class data must be skipped so the reader stays aligned
-                // for subsequent properties.
-                let value = Value::Class(InstanceRef::new(struct_index, self.instance_index));
-                self.skip_class(struct_index, reader);
-                value
-            }
-            DataType::StrongPointer => {
-                let pointer: DataCorePointer = reader.read_struct().ok()?;
-                if pointer.is_null() {
-                    Value::StrongPointer(None)
-                } else {
-                    Value::StrongPointer(Some(InstanceRef::new(
-                        pointer.struct_index as u32,
-                        pointer.instance_index as u32,
-                    )))
-                }
-            }
-            DataType::WeakPointer => {
-                let pointer: DataCorePointer = reader.read_struct().ok()?;
-                if pointer.is_null() {
-                    Value::WeakPointer(None)
-                } else {
-                    Value::WeakPointer(Some(InstanceRef::new(
-                        pointer.struct_index as u32,
-                        pointer.instance_index as u32,
-                    )))
-                }
-            }
-            DataType::Reference => {
-                let reference: DataCoreReference = reader.read_struct().ok()?;
-                if reference.is_null() {
-                    Value::Reference(None)
-                } else {
-                    Value::Reference(Some(RecordRef::new(reference.record_id)))
-                }
-            }
-        })
-    }
-
     fn skip_property(&self, prop: &DataCorePropertyDefinition, reader: &mut BinaryReader<'_>) {
         let data_type = match DataType::from_u16(prop.data_type) {
             Some(dt) => dt,
@@ -280,20 +244,13 @@ impl<'a> Instance<'a> {
             // Single value
             if data_type == DataType::Class {
                 // For nested classes, we need to skip all their properties recursively
-                self.skip_class(prop.struct_index as u32, reader);
+                skip_class_inline(self.database, prop.struct_index as u32, reader);
             } else {
                 reader.advance(data_type.inline_size());
             }
         } else {
             // Array - just skip the count and first_index (8 bytes)
             reader.advance(8);
-        }
-    }
-
-    fn skip_class(&self, struct_index: u32, reader: &mut BinaryReader<'_>) {
-        let properties = self.database.get_struct_properties(struct_index as usize);
-        for prop in properties {
-            self.skip_property(prop, reader);
         }
     }
 }
@@ -475,9 +432,9 @@ pub struct PropertyIterator<'a> {
 }
 
 impl<'a> PropertyIterator<'a> {
-    fn new(database: &'a DataCoreDatabase, struct_index: u32, instance_index: u32) -> Self {
+    fn from_data(database: &'a DataCoreDatabase, struct_index: u32, data: &'a [u8]) -> Self {
         let properties = database.get_struct_properties(struct_index as usize);
-        let reader = database.get_instance_reader(struct_index as usize, instance_index as usize);
+        let reader = BinaryReader::new(data);
 
         Self {
             database,
@@ -626,7 +583,15 @@ impl<'a> Iterator for ArrayIterator<'a> {
                 Value::Guid(self.database.guid_value(index).unwrap_or_default())
             }
             ArrayElementType::Class => {
-                Value::Class(InstanceRef::new(self.array.struct_index, index as u32))
+                // UPSTREAM: Array Class elements are stored as separate instances in the
+                // data block, addressable by (struct_index, instance_index).
+                let data = self
+                    .database
+                    .get_instance_data(self.array.struct_index as usize, index);
+                Value::Class {
+                    struct_index: self.array.struct_index,
+                    data,
+                }
             }
             ArrayElementType::StrongPointer => {
                 let ptr = self.database.strong_value(index);
@@ -668,11 +633,16 @@ impl ExactSizeIterator for ArrayIterator<'_> {}
 
 // Helper functions
 
+/// Read a single property value from an inline byte stream.
+///
+/// UPSTREAM: For `DataType::Class`, this captures the inline bytes from the
+/// reader and stores them in `Value::Class { data }`, enabling correct
+/// resolution when the value is later used to construct an Instance.
 fn read_single_value<'a>(
     database: &'a DataCoreDatabase,
     data_type: DataType,
     struct_index: u32,
-    reader: &mut BinaryReader<'_>,
+    reader: &mut BinaryReader<'a>,
 ) -> Option<Value<'a>> {
     Some(match data_type {
         DataType::Boolean => Value::Bool(reader.read_bool().ok()?),
@@ -700,11 +670,14 @@ fn read_single_value<'a>(
             Value::Enum(database.get_string(&string_id).unwrap_or(""))
         }
         DataType::Class => {
-            // UPSTREAM: The inline class data must be skipped so the reader stays aligned
-            // for subsequent properties.
-            let value = Value::Class(InstanceRef::new(struct_index, 0));
+            // UPSTREAM: Capture the inline class data from the reader's byte stream.
+            // The data starts at the current reader position and extends for the full
+            // size of the class's properties (computed by skip_class_inline).
+            let start = reader.position();
             skip_class_inline(database, struct_index, reader);
-            value
+            let end = reader.position();
+            let data = reader.sub_slice(start, end);
+            Value::Class { struct_index, data }
         }
         DataType::StrongPointer => {
             let pointer: DataCorePointer = reader.read_struct().ok()?;
@@ -765,10 +738,9 @@ fn data_type_to_array_element(data_type: DataType) -> ArrayElementType {
 
 /// Skip past all inline data for a Class property in the byte stream.
 ///
-/// UPSTREAM: This is the standalone equivalent of `Instance::skip_class()`,
-/// used by the standalone `read_single_value()` and `PropertyIterator`.
-/// Without this, the reader falls out of alignment after any inline Class
-/// property, causing all subsequent property reads to return garbage.
+/// UPSTREAM: This is used to compute the size of inline class data and
+/// advance the reader past it. The reader position before/after this call
+/// defines the byte range of the inline class data.
 fn skip_class_inline(
     database: &DataCoreDatabase,
     struct_index: u32,

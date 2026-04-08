@@ -41,8 +41,12 @@ pub enum Value<'a> {
     Enum(&'a str),
     /// GUID value.
     Guid(CigGuid),
-    /// Nested struct instance.
-    Class(InstanceRef),
+    /// Nested struct instance (inline class data).
+    ///
+    /// UPSTREAM: Class properties embed their data inline within the parent
+    /// instance's byte stream. The `data` slice contains the raw bytes of the
+    /// inline class, which can be used to construct an Instance for reading.
+    Class { struct_index: u32, data: &'a [u8] },
     /// Strong pointer to another instance.
     StrongPointer(Option<InstanceRef>),
     /// Weak pointer to another instance.
@@ -227,12 +231,25 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// Try to get this value as an instance reference (for Class types).
+    /// Try to get this value as an instance reference (for pointer types).
+    ///
+    /// Note: This returns `None` for `Value::Class` since inline classes don't
+    /// have a valid InstanceRef. Use `Instance::get_instance()` to access
+    /// inline class data.
     #[inline]
     pub fn as_instance(&self) -> Option<InstanceRef> {
         match self {
-            Value::Class(r) => Some(*r),
             Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// Get the struct_index for Class, StrongPointer, or WeakPointer values.
+    #[inline]
+    pub fn struct_index(&self) -> Option<u32> {
+        match self {
+            Value::Class { struct_index, .. } => Some(*struct_index),
+            Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => Some(r.struct_index),
             _ => None,
         }
     }
@@ -272,8 +289,12 @@ impl std::fmt::Display for Value<'_> {
             Value::Double(v) => write!(f, "{}", v),
             Value::String(s) | Value::Locale(s) | Value::Enum(s) => write!(f, "{}", s),
             Value::Guid(g) => write!(f, "{}", g),
-            Value::Class(r) => write!(f, "Instance({}, {})", r.struct_index, r.instance_index),
-            Value::StrongPointer(Some(r)) => write!(f, "StrongPtr({}, {})", r.struct_index, r.instance_index),
+            Value::Class { struct_index, data } => {
+                write!(f, "Class(struct={}, {} bytes)", struct_index, data.len())
+            }
+            Value::StrongPointer(Some(r)) => {
+                write!(f, "StrongPtr({}, {})", r.struct_index, r.instance_index)
+            }
             Value::StrongPointer(None) => write!(f, "StrongPtr(null)"),
             Value::WeakPointer(Some(r)) => write!(f, "WeakPtr({}, {})", r.struct_index, r.instance_index),
             Value::WeakPointer(None) => write!(f, "WeakPtr(null)"),
