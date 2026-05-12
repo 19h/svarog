@@ -219,7 +219,7 @@ impl<'a> Instance<'a> {
     ) -> Option<Value<'a>> {
         let data_type = DataType::from_u16(prop.data_type)?;
 
-        if prop.conversion_type == 0 {
+        if !prop.is_array() {
             // Single value
             read_single_value(self.database, data_type, prop.struct_index as u32, reader)
         } else {
@@ -242,7 +242,7 @@ impl<'a> Instance<'a> {
             None => return,
         };
 
-        if prop.conversion_type == 0 {
+        if !prop.is_array() {
             // Single value
             if data_type == DataType::Class {
                 // For nested classes, we need to skip all their properties recursively
@@ -461,7 +461,7 @@ impl<'a> Iterator for PropertyIterator<'a> {
         let name = self.database.property_name(prop).unwrap_or("Unknown");
         let data_type = DataType::from_u16(prop.data_type)?;
 
-        let value = if prop.conversion_type == 0 {
+        let value = if !prop.is_array() {
             // Single value
             read_single_value(
                 self.database,
@@ -756,7 +756,7 @@ fn skip_property_inline(
         None => return,
     };
 
-    if prop.conversion_type == 0 {
+    if !prop.is_array() {
         // Single value
         if data_type == DataType::Class {
             skip_class_inline(database, prop.struct_index as u32, reader);

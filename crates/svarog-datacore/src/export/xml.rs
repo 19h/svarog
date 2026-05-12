@@ -167,7 +167,7 @@ impl<'a, W: Write> ExportContext<'a, W> {
                 None => continue,
             };
 
-            if prop.conversion_type == 0 {
+            if !prop.is_array() {
                 // Single attribute
                 self.write_attribute_value(prop_name, data_type, prop.struct_index as i32, reader)?;
             } else {

@@ -29,7 +29,7 @@ impl DataCorePropertyDefinition {
 
     /// Check if this property is an array.
     pub fn is_array(&self) -> bool {
-        self.conversion_type == 1
+        self.conversion_type != 0
     }
 }
 
@@ -41,8 +41,10 @@ impl DataCorePropertyDefinition {
 pub enum ConversionType {
     /// Single value.
     Attribute = 0,
-    /// Array of values.
-    ComplexArray = 1,
-    /// Simple array.
-    SimpleArray = 2,
+    /// Dynamic array of values.
+    DynamicArray = 1,
+    /// Fixed array of values.
+    FixedArray = 2,
+    /// Fixed array keyed by enum values.
+    EnumFixedArray = 3,
 }

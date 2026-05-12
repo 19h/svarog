@@ -32,6 +32,11 @@ pub const fn is_supported_version(version: u32) -> bool {
     version >= MIN_SUPPORTED_VERSION && version <= MAX_SUPPORTED_VERSION
 }
 
+#[inline]
+const fn uses_v8_layout(version: u32) -> bool {
+    version >= 8
+}
+
 /// Pool counts for copying databases.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PoolCounts {
@@ -241,11 +246,19 @@ impl DataCoreDatabase {
         let text_length_2 = reader.read_u32()? as usize;
 
         // Read definitions (these are small, worth copying for cache locality)
-        let struct_definitions = Self::read_structs(&mut reader, struct_def_count)?;
+        let mut struct_definitions = Self::read_structs(&mut reader, struct_def_count)?;
         let property_definitions = Self::read_structs(&mut reader, property_def_count)?;
         let enum_definitions = Self::read_structs(&mut reader, enum_def_count)?;
         let data_mappings = Self::read_structs(&mut reader, data_mapping_count)?;
-        let records: Vec<DataCoreRecord> = Self::read_structs(&mut reader, record_def_count)?;
+        let records: Vec<DataCoreRecord> = if uses_v8_layout(version) {
+            Self::read_records_v8(&mut reader, record_def_count)?
+        } else {
+            Self::read_structs(&mut reader, record_def_count)?
+        };
+
+        if uses_v8_layout(version) {
+            Self::normalize_v8_schema(&mut struct_definitions);
+        }
 
         // Record offsets for value pools (zero-copy access)
         let int8_offset = reader.position();
@@ -816,6 +829,37 @@ impl DataCoreDatabase {
         }
 
         Ok(result)
+    }
+
+    fn read_records_v8(reader: &mut BinaryReader, count: usize) -> Result<Vec<DataCoreRecord>> {
+        let mut result = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let name_offset = DataCoreStringId2::new(reader.read_i32()?);
+            let file_name_offset = DataCoreStringId::new(reader.read_i32()?);
+            let _team_offset = reader.read_i32()?;
+            let struct_index = reader.read_i32()?;
+            let id = reader.read_struct::<CigGuid>()?;
+            let instance_index = reader.read_u16()?;
+            let struct_size = reader.read_u16()?;
+
+            result.push(DataCoreRecord {
+                name_offset,
+                file_name_offset,
+                struct_index,
+                id,
+                instance_index,
+                struct_size,
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn normalize_v8_schema(struct_definitions: &mut [DataCoreStructDefinition]) {
+        for def in struct_definitions {
+            def.struct_size &= 0xFFFF;
+        }
     }
 
     // Raw data access for builder (to copy pools without re-parsing)

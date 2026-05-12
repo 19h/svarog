@@ -54,7 +54,7 @@ impl<'a> RecordWalker<'a> {
                 None => continue,
             };
 
-            if prop.conversion_type == 0 {
+            if !prop.is_array() {
                 // Single attribute
                 self.walk_attribute(data_type, prop.struct_index as i32, reader);
             } else {

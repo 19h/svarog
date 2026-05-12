@@ -230,7 +230,7 @@ impl<'a> CHeaderExporter<'a> {
         // Note: Only Class (embedded struct) requires full definition before use.
         // StrongPointer, WeakPointer, and arrays use dc_strong_ptr/dc_weak_ptr/dc_array
         // which don't require the target type to be fully defined.
-        for prop in self.db.get_struct_properties(idx) {
+        for prop in self.direct_struct_properties(idx) {
             if let Some(dt) = DataType::from_u16(prop.data_type) {
                 match dt {
                     DataType::Class if !prop.is_array() => {
@@ -309,10 +309,19 @@ impl<'a> CHeaderExporter<'a> {
         } else {
             ""
         };
+        let parent_size = if parent_index >= 0 {
+            self.db
+                .struct_definitions()
+                .get(parent_index as usize)
+                .map(|parent| parent.struct_size as usize)
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
         // Build layout
         let layout = self.build_struct_layout(struct_index);
-        let payload_size: usize = layout.iter().map(|f| f.size).sum();
+        let payload_size: usize = parent_size + layout.iter().map(|f| f.size).sum::<usize>();
 
         let _ = writeln!(output, "/*");
         let _ = writeln!(output, " * struct_index : {}", struct_index);
@@ -474,9 +483,24 @@ impl<'a> CHeaderExporter<'a> {
     /// Build struct layout for C export.
     fn build_struct_layout(&self, struct_index: usize) -> Vec<FieldLayout> {
         let mut layout = Vec::new();
-        let mut offset = 0usize;
 
-        let props = self.db.get_struct_properties(struct_index);
+        let props = self.direct_struct_properties(struct_index);
+        let mut offset = self
+            .db
+            .struct_definitions()
+            .get(struct_index)
+            .and_then(|def| {
+                if def.parent_type_index >= 0 {
+                    self.db
+                        .struct_definitions()
+                        .get(def.parent_type_index as usize)
+                } else {
+                    None
+                }
+            })
+            .map(|parent| parent.struct_size as usize)
+            .unwrap_or(0);
+
         for prop in props {
             let raw_name = self.db.property_name(prop).unwrap_or("Unknown");
             let name = escape_c_keyword(raw_name);
@@ -516,6 +540,22 @@ impl<'a> CHeaderExporter<'a> {
         }
 
         layout
+    }
+
+    fn direct_struct_properties(
+        &self,
+        struct_index: usize,
+    ) -> &[crate::structs::DataCorePropertyDefinition] {
+        let Some(def) = self.db.struct_definitions().get(struct_index) else {
+            return &[];
+        };
+
+        let start = def.first_attribute_index as usize;
+        let end = start.saturating_add(def.attribute_count as usize);
+        self.db
+            .property_definitions()
+            .get(start..end)
+            .unwrap_or(&[])
     }
 }
 
