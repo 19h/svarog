@@ -2,8 +2,8 @@
 //!
 //! Tests ALL data types and verifies exact value preservation.
 
-use svarog_datacore::{DataCoreBuilder, DataCoreDatabase, DataType, Value};
 use svarog_common::CigGuid;
+use svarog_datacore::{DataCoreBuilder, DataCoreDatabase, DataType, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Comprehensive DCB Roundtrip Test ===\n");
@@ -39,11 +39,11 @@ fn test_all_primitives() -> Result<(), Box<dyn std::error::Error>> {
     // Note: DataType uses SByte for signed byte, Byte for unsigned
     let test_struct = builder.add_struct("AllPrimitives", None);
     builder.add_property(test_struct, "boolVal", DataType::Boolean);
-    builder.add_property(test_struct, "int8Val", DataType::SByte);      // SByte = signed byte
+    builder.add_property(test_struct, "int8Val", DataType::SByte); // SByte = signed byte
     builder.add_property(test_struct, "int16Val", DataType::Int16);
     builder.add_property(test_struct, "int32Val", DataType::Int32);
     builder.add_property(test_struct, "int64Val", DataType::Int64);
-    builder.add_property(test_struct, "uint8Val", DataType::Byte);      // Byte = unsigned byte
+    builder.add_property(test_struct, "uint8Val", DataType::Byte); // Byte = unsigned byte
     builder.add_property(test_struct, "uint16Val", DataType::UInt16);
     builder.add_property(test_struct, "uint32Val", DataType::UInt32);
     builder.add_property(test_struct, "uint64Val", DataType::UInt64);
@@ -76,10 +76,15 @@ fn test_all_primitives() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Wrote DCB to {}", path);
 
     let db = DataCoreDatabase::parse(&std::fs::read(path)?)?;
-    println!("  Read back: {} structs, {} records", db.struct_definitions().len(), db.records().len());
+    println!(
+        "  Read back: {} structs, {} records",
+        db.struct_definitions().len(),
+        db.records().len()
+    );
 
     // Verify the record
-    let record = db.record_by_name("TestRecord")
+    let record = db
+        .record_by_name("TestRecord")
         .ok_or("TestRecord not found")?;
 
     // Check each value individually
@@ -102,12 +107,18 @@ fn test_all_primitives() -> Result<(), Box<dyn std::error::Error>> {
 
     match record.get("int32Val") {
         Some(Value::Int32(v)) if v == -123456789 => println!("  ✓ int32Val = -123456789"),
-        other => errors.push(format!("int32Val: expected Int32(-123456789), got {:?}", other)),
+        other => errors.push(format!(
+            "int32Val: expected Int32(-123456789), got {:?}",
+            other
+        )),
     }
 
     match record.get("int64Val") {
         Some(Value::Int64(v)) if v == -9876543210 => println!("  ✓ int64Val = -9876543210"),
-        other => errors.push(format!("int64Val: expected Int64(-9876543210), got {:?}", other)),
+        other => errors.push(format!(
+            "int64Val: expected Int64(-9876543210), got {:?}",
+            other
+        )),
     }
 
     match record.get("uint8Val") {
@@ -117,37 +128,64 @@ fn test_all_primitives() -> Result<(), Box<dyn std::error::Error>> {
 
     match record.get("uint16Val") {
         Some(Value::UInt16(v)) if v == 60000 => println!("  ✓ uint16Val = 60000"),
-        other => errors.push(format!("uint16Val: expected UInt16(60000), got {:?}", other)),
+        other => errors.push(format!(
+            "uint16Val: expected UInt16(60000), got {:?}",
+            other
+        )),
     }
 
     match record.get("uint32Val") {
         Some(Value::UInt32(v)) if v == 4000000000 => println!("  ✓ uint32Val = 4000000000"),
-        other => errors.push(format!("uint32Val: expected UInt32(4000000000), got {:?}", other)),
+        other => errors.push(format!(
+            "uint32Val: expected UInt32(4000000000), got {:?}",
+            other
+        )),
     }
 
     match record.get("uint64Val") {
-        Some(Value::UInt64(v)) if v == 18000000000000000000 => println!("  ✓ uint64Val = 18000000000000000000"),
-        other => errors.push(format!("uint64Val: expected UInt64(18000000000000000000), got {:?}", other)),
+        Some(Value::UInt64(v)) if v == 18000000000000000000 => {
+            println!("  ✓ uint64Val = 18000000000000000000")
+        }
+        other => errors.push(format!(
+            "uint64Val: expected UInt64(18000000000000000000), got {:?}",
+            other
+        )),
     }
 
     match record.get("floatVal") {
         Some(Value::Float(v)) if (v - 3.14159).abs() < 0.0001 => println!("  ✓ floatVal ≈ 3.14159"),
-        other => errors.push(format!("floatVal: expected Float(~3.14159), got {:?}", other)),
+        other => errors.push(format!(
+            "floatVal: expected Float(~3.14159), got {:?}",
+            other
+        )),
     }
 
     match record.get("doubleVal") {
-        Some(Value::Double(v)) if (v - 2.718281828459045).abs() < 0.0000001 => println!("  ✓ doubleVal ≈ 2.718281828459045"),
-        other => errors.push(format!("doubleVal: expected Double(~2.718281828459045), got {:?}", other)),
+        Some(Value::Double(v)) if (v - 2.718281828459045).abs() < 0.0000001 => {
+            println!("  ✓ doubleVal ≈ 2.718281828459045")
+        }
+        other => errors.push(format!(
+            "doubleVal: expected Double(~2.718281828459045), got {:?}",
+            other
+        )),
     }
 
     match record.get("stringVal") {
-        Some(Value::String(v)) if v == "Hello, DCB World!" => println!("  ✓ stringVal = \"Hello, DCB World!\""),
-        other => errors.push(format!("stringVal: expected String(\"Hello, DCB World!\"), got {:?}", other)),
+        Some(Value::String(v)) if v == "Hello, DCB World!" => {
+            println!("  ✓ stringVal = \"Hello, DCB World!\"")
+        }
+        other => errors.push(format!(
+            "stringVal: expected String(\"Hello, DCB World!\"), got {:?}",
+            other
+        )),
     }
 
     match record.get("guidVal") {
         Some(Value::Guid(v)) if v == test_guid => println!("  ✓ guidVal = {}", test_guid),
-        other => errors.push(format!("guidVal: expected Guid({}), got {:?}", test_guid, other)),
+        other => errors.push(format!(
+            "guidVal: expected Guid({}), got {:?}",
+            test_guid, other
+        )),
     }
 
     // Clean up
@@ -189,7 +227,8 @@ fn test_arrays() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Wrote DCB to {}", path);
 
     let db = DataCoreDatabase::parse(&std::fs::read(path)?)?;
-    let record = db.record_by_name("ArrayRecord")
+    let record = db
+        .record_by_name("ArrayRecord")
         .ok_or("ArrayRecord not found")?;
 
     let mut errors = Vec::new();
@@ -207,7 +246,10 @@ fn test_arrays() -> Result<(), Box<dyn std::error::Error>> {
         if values == expected {
             println!("  ✓ intArray = [1, 2, 3, 4, 5]");
         } else {
-            errors.push(format!("intArray: expected {:?}, got {:?}", expected, values));
+            errors.push(format!(
+                "intArray: expected {:?}, got {:?}",
+                expected, values
+            ));
         }
     } else {
         errors.push("intArray: not found or not an array".to_string());
@@ -218,16 +260,37 @@ fn test_arrays() -> Result<(), Box<dyn std::error::Error>> {
         let values: Vec<_> = arr.collect();
         if values.len() == 3 {
             let mut ok = true;
-            if let Value::Float(v) = values[0] { if (v - 1.1).abs() > 0.01 { ok = false; } } else { ok = false; }
-            if let Value::Float(v) = values[1] { if (v - 2.2).abs() > 0.01 { ok = false; } } else { ok = false; }
-            if let Value::Float(v) = values[2] { if (v - 3.3).abs() > 0.01 { ok = false; } } else { ok = false; }
+            if let Value::Float(v) = values[0] {
+                if (v - 1.1).abs() > 0.01 {
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
+            if let Value::Float(v) = values[1] {
+                if (v - 2.2).abs() > 0.01 {
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
+            if let Value::Float(v) = values[2] {
+                if (v - 3.3).abs() > 0.01 {
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
             if ok {
                 println!("  ✓ floatArray ≈ [1.1, 2.2, 3.3]");
             } else {
                 errors.push(format!("floatArray: values don't match, got {:?}", values));
             }
         } else {
-            errors.push(format!("floatArray: expected 3 elements, got {}", values.len()));
+            errors.push(format!(
+                "floatArray: expected 3 elements, got {}",
+                values.len()
+            ));
         }
     } else {
         errors.push("floatArray: not found or not an array".to_string());
@@ -244,7 +307,10 @@ fn test_arrays() -> Result<(), Box<dyn std::error::Error>> {
         if values == expected {
             println!("  ✓ stringArray = [\"one\", \"two\", \"three\"]");
         } else {
-            errors.push(format!("stringArray: expected {:?}, got {:?}", expected, values));
+            errors.push(format!(
+                "stringArray: expected {:?}, got {:?}",
+                expected, values
+            ));
         }
     } else {
         errors.push("stringArray: not found or not an array".to_string());
@@ -263,7 +329,10 @@ fn test_arrays() -> Result<(), Box<dyn std::error::Error>> {
         if values == expected {
             println!("  ✓ boolArray = [true, false, true, true, false]");
         } else {
-            errors.push(format!("boolArray: expected {:?}, got {:?}", expected, values));
+            errors.push(format!(
+                "boolArray: expected {:?}, got {:?}",
+                expected, values
+            ));
         }
     } else {
         errors.push("boolArray: not found or not an array".to_string());
@@ -324,7 +393,8 @@ fn test_pointers_and_references() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Wrote DCB to {}", path);
 
     let db = DataCoreDatabase::parse(&std::fs::read(path)?)?;
-    let record = db.record_by_name("MainRecord")
+    let record = db
+        .record_by_name("MainRecord")
         .ok_or("MainRecord not found")?;
 
     let mut errors = Vec::new();
@@ -332,7 +402,10 @@ fn test_pointers_and_references() -> Result<(), Box<dyn std::error::Error>> {
     // Check strong pointer
     match record.get("strongPtr") {
         Some(Value::StrongPointer(Some(ptr))) => {
-            println!("  ✓ strongPtr = StrongPointer(struct={}, instance={})", ptr.struct_index, ptr.instance_index);
+            println!(
+                "  ✓ strongPtr = StrongPointer(struct={}, instance={})",
+                ptr.struct_index, ptr.instance_index
+            );
         }
         other => errors.push(format!("strongPtr: expected Some pointer, got {:?}", other)),
     }
@@ -340,7 +413,10 @@ fn test_pointers_and_references() -> Result<(), Box<dyn std::error::Error>> {
     // Check weak pointer
     match record.get("weakPtr") {
         Some(Value::WeakPointer(Some(ptr))) => {
-            println!("  ✓ weakPtr = WeakPointer(struct={}, instance={})", ptr.struct_index, ptr.instance_index);
+            println!(
+                "  ✓ weakPtr = WeakPointer(struct={}, instance={})",
+                ptr.struct_index, ptr.instance_index
+            );
         }
         other => errors.push(format!("weakPtr: expected Some pointer, got {:?}", other)),
     }
@@ -348,17 +424,26 @@ fn test_pointers_and_references() -> Result<(), Box<dyn std::error::Error>> {
     // Check null pointers
     match record.get("nullStrong") {
         Some(Value::StrongPointer(None)) => println!("  ✓ nullStrong = StrongPointer(None)"),
-        other => errors.push(format!("nullStrong: expected StrongPointer(None), got {:?}", other)),
+        other => errors.push(format!(
+            "nullStrong: expected StrongPointer(None), got {:?}",
+            other
+        )),
     }
 
     match record.get("nullWeak") {
         Some(Value::WeakPointer(None)) => println!("  ✓ nullWeak = WeakPointer(None)"),
-        other => errors.push(format!("nullWeak: expected WeakPointer(None), got {:?}", other)),
+        other => errors.push(format!(
+            "nullWeak: expected WeakPointer(None), got {:?}",
+            other
+        )),
     }
 
     match record.get("nullRef") {
         Some(Value::Reference(None)) => println!("  ✓ nullRef = Reference(None)"),
-        other => errors.push(format!("nullRef: expected Reference(None), got {:?}", other)),
+        other => errors.push(format!(
+            "nullRef: expected Reference(None), got {:?}",
+            other
+        )),
     }
 
     std::fs::remove_file(path)?;
@@ -401,15 +486,21 @@ fn test_nested_structs() -> Result<(), Box<dyn std::error::Error>> {
     let db = DataCoreDatabase::parse(&std::fs::read(path)?)?;
     println!("  Structs: {:?}", db.type_names());
 
-    let record = db.record_by_name("TestDerived")
+    let record = db
+        .record_by_name("TestDerived")
         .ok_or("TestDerived not found")?;
 
     let mut errors = Vec::new();
 
     // Verify inherited properties
     match record.get("name") {
-        Some(Value::String(v)) if v == "Test Entity" => println!("  ✓ name = \"Test Entity\" (inherited)"),
-        other => errors.push(format!("name: expected String(\"Test Entity\"), got {:?}", other)),
+        Some(Value::String(v)) if v == "Test Entity" => {
+            println!("  ✓ name = \"Test Entity\" (inherited)")
+        }
+        other => errors.push(format!(
+            "name: expected String(\"Test Entity\"), got {:?}",
+            other
+        )),
     }
 
     match record.get("id") {
@@ -418,8 +509,13 @@ fn test_nested_structs() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match record.get("extraValue") {
-        Some(Value::Float(v)) if (v - 123.456).abs() < 0.001 => println!("  ✓ extraValue ≈ 123.456"),
-        other => errors.push(format!("extraValue: expected Float(~123.456), got {:?}", other)),
+        Some(Value::Float(v)) if (v - 123.456).abs() < 0.001 => {
+            println!("  ✓ extraValue ≈ 123.456")
+        }
+        other => errors.push(format!(
+            "extraValue: expected Float(~123.456), got {:?}",
+            other
+        )),
     }
 
     std::fs::remove_file(path)?;
@@ -463,18 +559,24 @@ fn test_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Wrote DCB to {}", path);
 
     let db = DataCoreDatabase::parse(&std::fs::read(path)?)?;
-    let record = db.record_by_name("EdgeRecord")
+    let record = db
+        .record_by_name("EdgeRecord")
         .ok_or("EdgeRecord not found")?;
 
     let mut errors = Vec::new();
 
     match record.get("emptyString") {
         Some(Value::String(v)) if v.is_empty() => println!("  ✓ emptyString = \"\""),
-        other => errors.push(format!("emptyString: expected empty string, got {:?}", other)),
+        other => errors.push(format!(
+            "emptyString: expected empty string, got {:?}",
+            other
+        )),
     }
 
     match record.get("unicodeString") {
-        Some(Value::String(v)) if v == "Hello 世界 🌍" => println!("  ✓ unicodeString = \"Hello 世界 🌍\""),
+        Some(Value::String(v)) if v == "Hello 世界 🌍" => {
+            println!("  ✓ unicodeString = \"Hello 世界 🌍\"")
+        }
         other => errors.push(format!("unicodeString: expected unicode, got {:?}", other)),
     }
 
@@ -494,12 +596,16 @@ fn test_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match record.get("negativeFloat") {
-        Some(Value::Float(v)) if (v - (-999.999)).abs() < 0.001 => println!("  ✓ negativeFloat ≈ -999.999"),
+        Some(Value::Float(v)) if (v - (-999.999)).abs() < 0.001 => {
+            println!("  ✓ negativeFloat ≈ -999.999")
+        }
         other => errors.push(format!("negativeFloat: expected -999.999, got {:?}", other)),
     }
 
     match record.get("emptyGuid") {
-        Some(Value::Guid(v)) if v.is_empty() => println!("  ✓ emptyGuid = 00000000-0000-0000-0000-000000000000"),
+        Some(Value::Guid(v)) if v.is_empty() => {
+            println!("  ✓ emptyGuid = 00000000-0000-0000-0000-000000000000")
+        }
         other => errors.push(format!("emptyGuid: expected empty GUID, got {:?}", other)),
     }
 
@@ -533,7 +639,10 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     // Quick analysis of data_mappings in original
     let struct_count = u32::from_le_bytes(original_bytes[16..20].try_into().unwrap()) as usize;
     let mapping_count = u32::from_le_bytes(original_bytes[28..32].try_into().unwrap()) as usize;
-    println!("  Original header: struct_count={}, mapping_count={}", struct_count, mapping_count);
+    println!(
+        "  Original header: struct_count={}, mapping_count={}",
+        struct_count, mapping_count
+    );
 
     // Load original
     println!("  Parsing original DCB...");
@@ -543,8 +652,10 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let original_enum_count = original_db.enum_definitions().len();
     let original_property_count = original_db.property_definitions().len();
 
-    println!("  Original: {} structs, {} properties, {} enums, {} records",
-        original_struct_count, original_property_count, original_enum_count, original_record_count);
+    println!(
+        "  Original: {} structs, {} properties, {} enums, {} records",
+        original_struct_count, original_property_count, original_enum_count, original_record_count
+    );
 
     // Load into builder
     println!("  Loading into builder...");
@@ -554,8 +665,11 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Writing to buffer...");
     let roundtrip_bytes = builder.build()?;
 
-    println!("  Original size: {} bytes, Roundtrip size: {} bytes",
-        original_bytes.len(), roundtrip_bytes.len());
+    println!(
+        "  Original size: {} bytes, Roundtrip size: {} bytes",
+        original_bytes.len(),
+        roundtrip_bytes.len()
+    );
 
     let size_diff = original_bytes.len() as i64 - roundtrip_bytes.len() as i64;
     if size_diff != 0 {
@@ -578,7 +692,10 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(offset) = first_diff {
-        println!("  First byte difference at offset: {} (0x{:x})", offset, offset);
+        println!(
+            "  First byte difference at offset: {} (0x{:x})",
+            offset, offset
+        );
         println!("  Total differing bytes: {}", diff_count);
 
         // Show context around first difference
@@ -608,32 +725,49 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let roundtrip_enum_count = roundtrip_db.enum_definitions().len();
     let roundtrip_property_count = roundtrip_db.property_definitions().len();
 
-    println!("  Roundtrip: {} structs, {} properties, {} enums, {} records",
-        roundtrip_struct_count, roundtrip_property_count, roundtrip_enum_count, roundtrip_record_count);
+    println!(
+        "  Roundtrip: {} structs, {} properties, {} enums, {} records",
+        roundtrip_struct_count,
+        roundtrip_property_count,
+        roundtrip_enum_count,
+        roundtrip_record_count
+    );
 
     // Compare counts
     let mut errors = Vec::new();
 
     if original_struct_count != roundtrip_struct_count {
-        errors.push(format!("Struct count mismatch: {} vs {}", original_struct_count, roundtrip_struct_count));
+        errors.push(format!(
+            "Struct count mismatch: {} vs {}",
+            original_struct_count, roundtrip_struct_count
+        ));
     } else {
         println!("  ✓ Struct count matches: {}", original_struct_count);
     }
 
     if original_property_count != roundtrip_property_count {
-        errors.push(format!("Property count mismatch: {} vs {}", original_property_count, roundtrip_property_count));
+        errors.push(format!(
+            "Property count mismatch: {} vs {}",
+            original_property_count, roundtrip_property_count
+        ));
     } else {
         println!("  ✓ Property count matches: {}", original_property_count);
     }
 
     if original_enum_count != roundtrip_enum_count {
-        errors.push(format!("Enum count mismatch: {} vs {}", original_enum_count, roundtrip_enum_count));
+        errors.push(format!(
+            "Enum count mismatch: {} vs {}",
+            original_enum_count, roundtrip_enum_count
+        ));
     } else {
         println!("  ✓ Enum count matches: {}", original_enum_count);
     }
 
     if original_record_count != roundtrip_record_count {
-        errors.push(format!("Record count mismatch: {} vs {}", original_record_count, roundtrip_record_count));
+        errors.push(format!(
+            "Record count mismatch: {} vs {}",
+            original_record_count, roundtrip_record_count
+        ));
     } else {
         println!("  ✓ Record count matches: {}", original_record_count);
     }
@@ -644,7 +778,9 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let mut property_mismatches = 0;
 
     for (i, orig_record) in original_db.all_main_records().enumerate() {
-        if i >= 10 { break; }
+        if i >= 10 {
+            break;
+        }
 
         let record_name = orig_record.name().unwrap_or("?");
 
@@ -663,21 +799,29 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
                         property_mismatches += 1;
                         this_record_mismatches += 1;
                         if property_mismatches <= 20 {
-                            println!("    Mismatch {}.{}: {:?} vs {:?}",
-                                record_name, orig_prop.name, orig_prop.value, round_val);
+                            println!(
+                                "    Mismatch {}.{}: {:?} vs {:?}",
+                                record_name, orig_prop.name, orig_prop.value, round_val
+                            );
                         }
                     }
                 } else {
                     property_mismatches += 1;
                     if property_mismatches <= 5 {
-                        println!("    Property {} missing in roundtrip record {}", orig_prop.name, record_name);
+                        println!(
+                            "    Property {} missing in roundtrip record {}",
+                            orig_prop.name, record_name
+                        );
                     }
                 }
             }
             if this_record_mismatches == 0 {
                 println!("  ✓ {} OK", record_name);
             } else {
-                println!("  ✗ {} has {} mismatches", record_name, this_record_mismatches);
+                println!(
+                    "  ✗ {} has {} mismatches",
+                    record_name, this_record_mismatches
+                );
             }
             records_checked += 1;
         } else {
@@ -685,7 +829,10 @@ fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("  Checked {} records, {} property mismatches", records_checked, property_mismatches);
+    println!(
+        "  Checked {} records, {} property mismatches",
+        records_checked, property_mismatches
+    );
 
     if !errors.is_empty() || property_mismatches > 0 {
         if property_mismatches > 0 {
@@ -706,12 +853,16 @@ fn print_hex_dump(data: &[u8], base_offset: usize) {
         let offset = base_offset + i * 16;
         print!("  {:08x}: ", offset);
         for (j, byte) in chunk.iter().enumerate() {
-            if j == 8 { print!(" "); }
+            if j == 8 {
+                print!(" ");
+            }
             print!("{:02x} ", byte);
         }
         // Pad if less than 16 bytes
         for j in chunk.len()..16 {
-            if j == 8 { print!(" "); }
+            if j == 8 {
+                print!(" ");
+            }
             print!("   ");
         }
         print!(" |");
@@ -906,7 +1057,18 @@ fn identify_section(offset: usize, _db: &DataCoreDatabase, data: &[u8]) {
     ];
 
     for (name, start, end) in &sections {
-        let marker = if offset >= *start && offset < *end { " <-- HERE" } else { "" };
-        println!("    {}: {} - {} (size: {}){}", name, start, end, end - start, marker);
+        let marker = if offset >= *start && offset < *end {
+            " <-- HERE"
+        } else {
+            ""
+        };
+        println!(
+            "    {}: {} - {} (size: {}){}",
+            name,
+            start,
+            end,
+            end - start,
+            marker
+        );
     }
 }

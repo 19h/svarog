@@ -47,7 +47,7 @@ impl ExtractionDialog {
                     ui.add(
                         egui::TextEdit::singleline(&mut path_str)
                             .desired_width(300.0)
-                            .interactive(false)
+                            .interactive(false),
                     );
                     if ui.button("Browse...").clicked() {
                         if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -68,16 +68,28 @@ impl ExtractionDialog {
                 // Options
                 ui.label("Options:");
                 ui.vertical(|ui| {
-                    ui.checkbox(&mut state.extraction_options.incremental, "Incremental (skip existing)");
-                    ui.checkbox(&mut state.extraction_options.expand_socpak, "Expand SOCPAK archives");
-                    ui.checkbox(&mut state.extraction_options.extract_dcb, "Extract DataCore to XML");
+                    ui.checkbox(
+                        &mut state.extraction_options.incremental,
+                        "Incremental (skip existing)",
+                    );
+                    ui.checkbox(
+                        &mut state.extraction_options.expand_socpak,
+                        "Expand SOCPAK archives",
+                    );
+                    ui.checkbox(
+                        &mut state.extraction_options.extract_dcb,
+                        "Extract DataCore to XML",
+                    );
                 });
                 ui.end_row();
 
                 // Parallel workers
                 ui.label("Parallel workers:");
                 ui.horizontal(|ui| {
-                    ui.add(egui::Slider::new(&mut state.extraction_options.parallel_workers, 0..=16));
+                    ui.add(egui::Slider::new(
+                        &mut state.extraction_options.parallel_workers,
+                        0..=16,
+                    ));
                     if state.extraction_options.parallel_workers == 0 {
                         ui.label("(auto)");
                     }
@@ -99,9 +111,13 @@ impl ExtractionDialog {
                 let can_extract = !state.extraction_options.output_path.as_os_str().is_empty()
                     && state.p4k_archive.is_some();
 
-                if ui.add_enabled(can_extract, egui::Button::new(
-                    RichText::new("📤 Start Extraction").strong()
-                )).clicked() {
+                if ui
+                    .add_enabled(
+                        can_extract,
+                        egui::Button::new(RichText::new("📤 Start Extraction").strong()),
+                    )
+                    .clicked()
+                {
                     start_extraction(state);
                 }
             });
@@ -119,11 +135,7 @@ impl ExtractionDialog {
         ui.label(format!("{} / {} files", current, total));
 
         ui.add_space(5.0);
-        ui.label(
-            RichText::new(file)
-                .monospace()
-                .color(Color32::GRAY)
-        );
+        ui.label(RichText::new(file).monospace().color(Color32::GRAY));
 
         ui.add_space(20.0);
         ui.separator();
@@ -158,9 +170,11 @@ fn start_extraction(state: &mut AppState) {
 
         // Create output directory
         if let Err(e) = std::fs::create_dir_all(output_path) {
-            sender.send(crate::state::WorkerMessage::ExtractionComplete(
-                Err(format!("Failed to create output directory: {}", e))
-            )).ok();
+            sender
+                .send(crate::state::WorkerMessage::ExtractionComplete(Err(
+                    format!("Failed to create output directory: {}", e),
+                )))
+                .ok();
             return;
         }
 
@@ -175,9 +189,11 @@ fn start_extraction(state: &mut AppState) {
             match regex::Regex::new(&options.filter_pattern) {
                 Ok(re) => Some(FilterType::Regex(re)),
                 Err(e) => {
-                    sender.send(crate::state::WorkerMessage::ExtractionComplete(
-                        Err(format!("Invalid regex: {}", e))
-                    )).ok();
+                    sender
+                        .send(crate::state::WorkerMessage::ExtractionComplete(Err(
+                            format!("Invalid regex: {}", e),
+                        )))
+                        .ok();
                     return;
                 }
             }
@@ -185,9 +201,11 @@ fn start_extraction(state: &mut AppState) {
             match glob::Pattern::new(&options.filter_pattern) {
                 Ok(pat) => Some(FilterType::Glob(pat)),
                 Err(e) => {
-                    sender.send(crate::state::WorkerMessage::ExtractionComplete(
-                        Err(format!("Invalid glob pattern: {}", e))
-                    )).ok();
+                    sender
+                        .send(crate::state::WorkerMessage::ExtractionComplete(Err(
+                            format!("Invalid glob pattern: {}", e),
+                        )))
+                        .ok();
                     return;
                 }
             }
@@ -210,11 +228,13 @@ fn start_extraction(state: &mut AppState) {
                 }
             }
 
-            sender.send(crate::state::WorkerMessage::ExtractionProgress {
-                current: extracted,
-                total,
-                current_file: name.clone(),
-            }).ok();
+            sender
+                .send(crate::state::WorkerMessage::ExtractionProgress {
+                    current: extracted,
+                    total,
+                    current_file: name.clone(),
+                })
+                .ok();
 
             let file_path = output_path.join(&name);
 
@@ -242,12 +262,10 @@ fn start_extraction(state: &mut AppState) {
                     // Check for CryXML and decode
                     let final_data = if svarog::cryxml::CryXml::is_cryxml(&data) {
                         match svarog::cryxml::CryXml::parse(&data) {
-                            Ok(xml) => {
-                                match xml.to_xml_string() {
-                                    Ok(text) => text.into_bytes(),
-                                    Err(_) => data,
-                                }
-                            }
+                            Ok(xml) => match xml.to_xml_string() {
+                                Ok(text) => text.into_bytes(),
+                                Err(_) => data,
+                            },
                             Err(_) => data,
                         }
                     } else {
@@ -266,18 +284,24 @@ fn start_extraction(state: &mut AppState) {
             extracted += 1;
         }
 
-        sender.send(crate::state::WorkerMessage::ExtractionProgress {
-            current: extracted,
-            total,
-            current_file: "Complete!".to_string(),
-        }).ok();
+        sender
+            .send(crate::state::WorkerMessage::ExtractionProgress {
+                current: extracted,
+                total,
+                current_file: "Complete!".to_string(),
+            })
+            .ok();
 
         if errors.is_empty() {
-            sender.send(crate::state::WorkerMessage::ExtractionComplete(Ok(()))).ok();
+            sender
+                .send(crate::state::WorkerMessage::ExtractionComplete(Ok(())))
+                .ok();
         } else {
-            sender.send(crate::state::WorkerMessage::ExtractionComplete(
-                Err(format!("{} errors during extraction", errors.len()))
-            )).ok();
+            sender
+                .send(crate::state::WorkerMessage::ExtractionComplete(Err(
+                    format!("{} errors during extraction", errors.len()),
+                )))
+                .ok();
         }
     });
 }

@@ -119,8 +119,14 @@ mod tests {
 
         let attrs = parsed.node_attributes(root);
         assert_eq!(attrs.len(), 1);
-        assert_eq!(parsed.get_string(attrs[0].key_string_offset).unwrap(), "version");
-        assert_eq!(parsed.get_string(attrs[0].value_string_offset).unwrap(), "1.0");
+        assert_eq!(
+            parsed.get_string(attrs[0].key_string_offset).unwrap(),
+            "version"
+        );
+        assert_eq!(
+            parsed.get_string(attrs[0].value_string_offset).unwrap(),
+            "1.0"
+        );
     }
 
     #[test]
@@ -137,7 +143,10 @@ mod tests {
 
         let parsed = CryXml::parse(&bytes).unwrap();
         let root = parsed.root().unwrap();
-        assert_eq!(parsed.get_string(root.tag_string_offset).unwrap(), "Material");
+        assert_eq!(
+            parsed.get_string(root.tag_string_offset).unwrap(),
+            "Material"
+        );
         let child_count = root.child_count;
         assert_eq!(child_count, 1);
     }
@@ -162,10 +171,16 @@ mod tests {
         assert_eq!(root_child_count, 2);
 
         let children: Vec<_> = parsed.children(root).collect();
-        assert_eq!(parsed.get_string(children[0].tag_string_offset).unwrap(), "B");
+        assert_eq!(
+            parsed.get_string(children[0].tag_string_offset).unwrap(),
+            "B"
+        );
         let b_child_count = children[0].child_count;
         assert_eq!(b_child_count, 2);
-        assert_eq!(parsed.get_string(children[1].tag_string_offset).unwrap(), "E");
+        assert_eq!(
+            parsed.get_string(children[1].tag_string_offset).unwrap(),
+            "E"
+        );
     }
 
     #[test]
@@ -227,6 +242,9 @@ mod tests {
 
         assert_eq!(children.len(), 1);
         let child = children[0];
-        assert_eq!(parsed.get_string(child.content_string_offset).unwrap(), "Hello World");
+        assert_eq!(
+            parsed.get_string(child.content_string_offset).unwrap(),
+            "Hello World"
+        );
     }
 }

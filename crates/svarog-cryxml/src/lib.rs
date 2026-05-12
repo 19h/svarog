@@ -64,16 +64,16 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod attribute;
+pub mod builder;
 mod error;
+mod from_xml;
 mod header;
 mod node;
-mod attribute;
 mod parser;
-pub mod builder;
-mod from_xml;
 
+pub use attribute::CryXmlAttribute;
 pub use error::{Error, Result};
 pub use header::CryXmlHeader;
 pub use node::CryXmlNode;
-pub use attribute::CryXmlAttribute;
 pub use parser::CryXml;

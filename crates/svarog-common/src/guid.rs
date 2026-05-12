@@ -23,7 +23,9 @@ use crate::Error;
 /// - String positions 14-17 (third group): bytes 1,0
 /// - String positions 19-22 (fourth group): bytes 15,14
 /// - String positions 24-35 (fifth group): bytes 13,12,11,10,9,8
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, Default, FromBytes, IntoBytes, Immutable, KnownLayout,
+)]
 #[repr(C)]
 pub struct CigGuid {
     bytes: [u8; 16],
@@ -56,11 +58,15 @@ impl CigGuid {
             .unwrap_or(0);
 
         let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut state = time_seed.wrapping_add(counter).wrapping_mul(6364136223846793005);
+        let mut state = time_seed
+            .wrapping_add(counter)
+            .wrapping_mul(6364136223846793005);
 
         let mut bytes = [0u8; 16];
         for chunk in bytes.chunks_exact_mut(8) {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             chunk.copy_from_slice(&state.to_le_bytes());
         }
 
@@ -193,10 +199,7 @@ mod tests {
     fn test_empty_guid() {
         let guid = CigGuid::EMPTY;
         assert!(guid.is_empty());
-        assert_eq!(
-            guid.to_string(),
-            "00000000-0000-0000-0000-000000000000"
-        );
+        assert_eq!(guid.to_string(), "00000000-0000-0000-0000-000000000000");
     }
 
     #[test]
@@ -213,6 +216,8 @@ mod tests {
 
     #[test]
     fn test_invalid_hyphens() {
-        assert!("12345678_abcd-ef01-2345-6789abcdef01".parse::<CigGuid>().is_err());
+        assert!("12345678_abcd-ef01-2345-6789abcdef01"
+            .parse::<CigGuid>()
+            .is_err());
     }
 }

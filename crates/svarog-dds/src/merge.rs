@@ -71,7 +71,8 @@ pub fn merge_dds_data(base_data: &[u8], split_files: &[(u8, Vec<u8>)]) -> Result
         None
     };
 
-    let header_size = 4 + std::mem::size_of::<DdsHeader>()
+    let header_size = 4
+        + std::mem::size_of::<DdsHeader>()
         + if has_dx10 {
             std::mem::size_of::<DdsHeaderDxt10>()
         } else {
@@ -85,7 +86,10 @@ pub fn merge_dds_data(base_data: &[u8], split_files: &[(u8, Vec<u8>)]) -> Result
     let mip_sizes = calculate_mipmap_sizes(&header, dx10_header.as_ref());
 
     // Determine block size (used for alignment in future optimization)
-    let _blk_size = block_size(header.pixel_format.four_cc, dx10_header.map(|h| h.dxgi_format));
+    let _blk_size = block_size(
+        header.pixel_format.four_cc,
+        dx10_header.map(|h| h.dxgi_format),
+    );
 
     // Calculate the number of faces (for cubemaps)
     let num_faces = if split_files.is_empty() {

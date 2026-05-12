@@ -126,7 +126,10 @@ impl<'a> ParallelXmlExporter<'a> {
     ///
     /// This is useful when you want to process the XML in memory
     /// rather than writing to disk.
-    pub fn export_to_strings(&self, records: &[&DataCoreRecord]) -> Vec<Result<String, ExportError>> {
+    pub fn export_to_strings(
+        &self,
+        records: &[&DataCoreRecord],
+    ) -> Vec<Result<String, ExportError>> {
         let exporter = XmlExporter::new(self.database);
 
         records

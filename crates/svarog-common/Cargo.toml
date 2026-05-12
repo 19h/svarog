@@ -14,6 +14,7 @@ zerocopy.workspace = true
 thiserror.workspace = true
 crc32c.workspace = true
 memchr.workspace = true
+similar.workspace = true
 serde = { workspace = true, optional = true }
 
 [features]

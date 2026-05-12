@@ -166,16 +166,10 @@ impl P4kArchive {
 
     /// Parallel extraction of multiple entries.
     #[cfg(feature = "parallel")]
-    pub fn read_parallel<'a>(
-        &'a self,
-        entries: &[P4kEntryRef<'a>],
-    ) -> Vec<Result<Vec<u8>>> {
+    pub fn read_parallel<'a>(&'a self, entries: &[P4kEntryRef<'a>]) -> Vec<Result<Vec<u8>>> {
         use rayon::prelude::*;
 
-        entries
-            .par_iter()
-            .map(|entry| self.read(entry))
-            .collect()
+        entries.par_iter().map(|entry| self.read(entry)).collect()
     }
 
     /// Parallel extraction with callback for streaming.
@@ -379,10 +373,7 @@ impl P4kArchive {
         Ok(())
     }
 
-    fn read_cd_entry_compact(
-        reader: &mut BinaryReader,
-        is_zip64: bool,
-    ) -> Result<P4kEntryCompact> {
+    fn read_cd_entry_compact(reader: &mut BinaryReader, is_zip64: bool) -> Result<P4kEntryCompact> {
         // Read signature
         let sig = reader.read_u32()?;
         if sig != CentralDirectoryHeader::SIGNATURE {

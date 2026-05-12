@@ -56,7 +56,10 @@ impl eframe::App for SvarogApp {
                             match std::fs::read(&path) {
                                 Ok(data) => {
                                     self.state.datacore_loading = true;
-                                    crate::worker::load_datacore(data, self.state.worker_sender.clone());
+                                    crate::worker::load_datacore(
+                                        data,
+                                        self.state.worker_sender.clone(),
+                                    );
                                 }
                                 Err(e) => {
                                     self.state.show_error(format!("Failed to read file: {}", e));
@@ -127,8 +130,7 @@ impl eframe::App for SvarogApp {
                         ui.spinner();
                         ui.label(format!(
                             "Extracting: {} / {}",
-                            self.state.extraction_progress.0,
-                            self.state.extraction_progress.1
+                            self.state.extraction_progress.0, self.state.extraction_progress.1
                         ));
                     }
                 }
@@ -136,11 +138,9 @@ impl eframe::App for SvarogApp {
         });
 
         // Main content area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.state.active_tab {
-                ActiveTab::P4kBrowser => P4kBrowserPanel::show(ui, &mut self.state),
-                ActiveTab::DataCoreBrowser => DataCoreBrowserPanel::show(ui, &mut self.state),
-            }
+        egui::CentralPanel::default().show(ctx, |ui| match self.state.active_tab {
+            ActiveTab::P4kBrowser => P4kBrowserPanel::show(ui, &mut self.state),
+            ActiveTab::DataCoreBrowser => DataCoreBrowserPanel::show(ui, &mut self.state),
         });
 
         if self.state.about_open {
@@ -153,11 +153,11 @@ impl eframe::App for SvarogApp {
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new(
-"┏━┓╻ ╻┏━┓┏━┓┏━┓┏━╸
+                                "┏━┓╻ ╻┏━┓┏━┓┏━┓┏━╸
 ┗━┓┃┏┛┣━┫┣┳┛┃ ┃┃╺┓
-┗━┛┗┛ ╹ ╹╹┗╸┗━┛┗━┛"
+┗━┛┗┛ ╹ ╹╹┗╸┗━┛┗━┛",
                             )
-                            .monospace()
+                            .monospace(),
                         );
                         ui.separator();
                         ui.label(RichText::new("Dear CIG, you created this exploit.").monospace());

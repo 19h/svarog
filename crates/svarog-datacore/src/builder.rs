@@ -490,9 +490,8 @@ impl DataCoreBuilder {
             db.data_mappings()
                 .iter()
                 .map(|m| m.struct_index as usize)
-                .collect()
+                .collect(),
         );
-
 
         Ok(builder)
     }
@@ -512,9 +511,7 @@ impl DataCoreBuilder {
         let parent_index = parent.map(|h| h.0 as i32).unwrap_or(-1);
 
         // Inherit the parent's size if there is a parent
-        let initial_size = parent
-            .map(|h| self.structs[h.0 as usize].size)
-            .unwrap_or(0);
+        let initial_size = parent.map(|h| self.structs[h.0 as usize].size).unwrap_or(0);
 
         self.structs.push(StructDef {
             name: name.to_string(),
@@ -981,27 +978,28 @@ impl DataCoreBuilder {
         // Build data mappings - use original order if available, otherwise generate fresh
         // IMPORTANT: When loading from an existing database, we must preserve ALL mappings
         // including those with struct_count=0, as the mapping order defines the data layout.
-        let data_mappings: Vec<DataCoreDataMapping> = if let Some(ref original_order) = self.original_data_mapping_order {
-            // Use the original order from the source database - include ALL mappings
-            original_order
-                .iter()
-                .map(|&i| DataCoreDataMapping {
-                    struct_count: self.struct_instance_counts[i],
-                    struct_index: i as i32,
-                })
-                .collect()
-        } else {
-            // Generate fresh mappings - for new databases, only include non-empty structs
-            self.structs
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| self.struct_instance_counts[*i] > 0)
-                .map(|(i, _)| DataCoreDataMapping {
-                    struct_count: self.struct_instance_counts[i],
-                    struct_index: i as i32,
-                })
-                .collect()
-        };
+        let data_mappings: Vec<DataCoreDataMapping> =
+            if let Some(ref original_order) = self.original_data_mapping_order {
+                // Use the original order from the source database - include ALL mappings
+                original_order
+                    .iter()
+                    .map(|&i| DataCoreDataMapping {
+                        struct_count: self.struct_instance_counts[i],
+                        struct_index: i as i32,
+                    })
+                    .collect()
+            } else {
+                // Generate fresh mappings - for new databases, only include non-empty structs
+                self.structs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| self.struct_instance_counts[*i] > 0)
+                    .map(|(i, _)| DataCoreDataMapping {
+                        struct_count: self.struct_instance_counts[i],
+                        struct_index: i as i32,
+                    })
+                    .collect()
+            };
 
         // Build records
         let records: Vec<DataCoreRecord> = self
@@ -1009,7 +1007,13 @@ impl DataCoreBuilder {
             .iter()
             .map(|r| DataCoreRecord {
                 name_offset: DataCoreStringId2::new(self.string_table_2_offset(&r.name)),
-                file_name_offset: DataCoreStringId::new(self.string_table_1.offsets.get(&r.file_name).copied().unwrap_or(-1)),
+                file_name_offset: DataCoreStringId::new(
+                    self.string_table_1
+                        .offsets
+                        .get(&r.file_name)
+                        .copied()
+                        .unwrap_or(-1),
+                ),
                 struct_index: r.struct_index as i32,
                 id: r.guid,
                 instance_index: r.instance_index,

@@ -228,6 +228,72 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+
+    /// Compare two P4K archives
+    P4kCompare {
+        /// Path to the first (old) P4K file
+        #[arg(long, alias = "old")]
+        p4k1: PathBuf,
+
+        /// Path to the second (new) P4K file
+        #[arg(long, alias = "new")]
+        p4k2: PathBuf,
+
+        /// Show only added files
+        #[arg(long)]
+        added_only: bool,
+
+        /// Show only removed files
+        #[arg(long)]
+        removed_only: bool,
+
+        /// Show only modified files
+        #[arg(long)]
+        modified_only: bool,
+
+        /// Show full diff for XML/text files
+        #[arg(long, short)]
+        diff: bool,
+
+        /// Filter pattern (glob-style)
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
+
+    /// Compare two DCB databases
+    DcbCompare {
+        /// Path to the first (old) DCB or P4K file (DCB extracted from P4K automatically)
+        #[arg(long, alias = "old")]
+        dcb1: PathBuf,
+
+        /// Path to the second (new) DCB or P4K file (DCB extracted from P4K automatically)
+        #[arg(long, alias = "new")]
+        dcb2: PathBuf,
+
+        /// What to compare: records, structs, enums, or all
+        #[arg(long, default_value = "all")]
+        scope: String,
+
+        /// Show only added items
+        #[arg(long)]
+        added_only: bool,
+
+        /// Show only removed items
+        #[arg(long)]
+        removed_only: bool,
+
+        /// Show only modified items
+        #[arg(long)]
+        modified_only: bool,
+
+        /// Show full diff for modified items
+        #[arg(long, short)]
+        diff: bool,
+
+        /// Filter pattern (name filter)
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -255,7 +321,11 @@ fn main() -> Result<()> {
                 parallel,
             )?;
         }
-        Commands::P4kList { p4k, filter, detailed } => {
+        Commands::P4kList {
+            p4k,
+            filter,
+            detailed,
+        } => {
             cmd_p4k_list(&p4k, filter.as_deref(), detailed)?;
         }
         Commands::CryxmlConvert { input, output } => {
@@ -264,7 +334,11 @@ fn main() -> Result<()> {
         Commands::CryxmlCreate { input, output } => {
             cmd_cryxml_create(&input, &output)?;
         }
-        Commands::DcbExtract { input, output, filter } => {
+        Commands::DcbExtract {
+            input,
+            output,
+            filter,
+        } => {
             cmd_dcb_extract(&input, &output, filter.as_deref())?;
         }
         Commands::ChfProcess { input, output } => {
@@ -275,6 +349,46 @@ fn main() -> Result<()> {
         }
         Commands::DcbSchema { input, output } => {
             cmd_dcb_schema(&input, &output)?;
+        }
+        Commands::P4kCompare {
+            p4k1,
+            p4k2,
+            added_only,
+            removed_only,
+            modified_only,
+            diff,
+            filter,
+        } => {
+            cmd_p4k_compare(
+                &p4k1,
+                &p4k2,
+                added_only,
+                removed_only,
+                modified_only,
+                diff,
+                filter.as_deref(),
+            )?;
+        }
+        Commands::DcbCompare {
+            dcb1,
+            dcb2,
+            scope,
+            added_only,
+            removed_only,
+            modified_only,
+            diff,
+            filter,
+        } => {
+            cmd_dcb_compare(
+                &dcb1,
+                &dcb2,
+                &scope,
+                added_only,
+                removed_only,
+                modified_only,
+                diff,
+                filter.as_deref(),
+            )?;
         }
     }
 
@@ -304,7 +418,10 @@ impl CaseInsensitivePathMapper {
     /// to merge with existing P4K extracts (mixed case).
     fn resolve(&self, base: &Path, relative: &str) -> PathBuf {
         let mut result = base.to_path_buf();
-        let components: Vec<&str> = relative.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+        let components: Vec<&str> = relative
+            .split(['/', '\\'])
+            .filter(|s| !s.is_empty())
+            .collect();
 
         for (i, component) in components.iter().enumerate() {
             let is_last = i == components.len() - 1;
@@ -378,10 +495,14 @@ struct SocpakExtractionResult {
 
 /// Extract a SOCPAK (which is just a ZIP file) to a directory.
 /// Also decodes any CryXML files found inside.
-fn extract_socpak(data: &[u8], output_dir: &Path, pb: Option<&ProgressBar>) -> Result<SocpakExtractionResult> {
+fn extract_socpak(
+    data: &[u8],
+    output_dir: &Path,
+    pb: Option<&ProgressBar>,
+) -> Result<SocpakExtractionResult> {
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .context("Failed to open SOCPAK as ZIP archive")?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).context("Failed to open SOCPAK as ZIP archive")?;
 
     let mut extracted = 0;
     let mut cryxml_decoded = 0;
@@ -536,11 +657,17 @@ fn cmd_p4k_extract(
     let start = Instant::now();
     let archive = P4kArchive::open(p4k_path).context("Failed to open P4K archive")?;
 
-    println!("Loaded {} entries in {:?}", archive.entry_count(), start.elapsed());
+    println!(
+        "Loaded {} entries in {:?}",
+        archive.entry_count(),
+        start.elapsed()
+    );
 
     // Compile regex if using regex mode
     let regex_filter = if use_regex {
-        filter.map(|p| regex::Regex::new(p).context("Invalid regex pattern")).transpose()?
+        filter
+            .map(|p| regex::Regex::new(p).context("Invalid regex pattern"))
+            .transpose()?
     } else {
         None
     };
@@ -873,9 +1000,7 @@ fn cmd_p4k_extract(
             let mut dcb_errors = 0;
 
             for record in &records_to_export {
-                let file_name = database
-                    .record_file_name(record)
-                    .unwrap_or("unknown.xml");
+                let file_name = database.record_file_name(record).unwrap_or("unknown.xml");
 
                 // Update progress with current file
                 set_progress_message(&dcb_pb, Stage::DcbExport, file_name);
@@ -952,7 +1077,11 @@ fn cmd_p4k_list(p4k_path: &PathBuf, filter: Option<&str>, detailed: bool) -> Res
 }
 
 fn cmd_cryxml_convert(input: &PathBuf, output: &PathBuf) -> Result<()> {
-    println!("Converting CryXmlB to XML: {} -> {}", input.display(), output.display());
+    println!(
+        "Converting CryXmlB to XML: {} -> {}",
+        input.display(),
+        output.display()
+    );
 
     let data = fs::read(input).context("Failed to read input file")?;
 
@@ -972,7 +1101,11 @@ fn cmd_cryxml_convert(input: &PathBuf, output: &PathBuf) -> Result<()> {
 fn cmd_cryxml_create(input: &PathBuf, output: &PathBuf) -> Result<()> {
     use svarog::cryxml::builder::CryXmlBuilder;
 
-    println!("Converting XML to CryXmlB: {} -> {}", input.display(), output.display());
+    println!(
+        "Converting XML to CryXmlB: {} -> {}",
+        input.display(),
+        output.display()
+    );
 
     let xml = fs::read_to_string(input).context("Failed to read input file")?;
 
@@ -980,7 +1113,10 @@ fn cmd_cryxml_create(input: &PathBuf, output: &PathBuf) -> Result<()> {
     let cryxml_bytes = builder.build().context("Failed to build CryXmlB")?;
     fs::write(output, cryxml_bytes).context("Failed to write output file")?;
 
-    println!("Conversion complete ({} bytes)", fs::metadata(output)?.len());
+    println!(
+        "Conversion complete ({} bytes)",
+        fs::metadata(output)?.len()
+    );
 
     Ok(())
 }
@@ -1016,7 +1152,11 @@ fn cmd_dcb_extract(input: &PathBuf, output: &PathBuf, filter: Option<&str>) -> R
         main_records
     };
 
-    println!("Exporting {} records to {}...", filtered_records.len(), output.display());
+    println!(
+        "Exporting {} records to {}...",
+        filtered_records.len(),
+        output.display()
+    );
 
     fs::create_dir_all(output)?;
 
@@ -1024,7 +1164,9 @@ fn cmd_dcb_extract(input: &PathBuf, output: &PathBuf, filter: Option<&str>) -> R
     let pb = ProgressBar::new(filtered_records.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )?
             .progress_chars("#>-"),
     );
 
@@ -1033,9 +1175,7 @@ fn cmd_dcb_extract(input: &PathBuf, output: &PathBuf, filter: Option<&str>) -> R
     let mut errors = 0;
 
     for record in &filtered_records {
-        let file_name = database
-            .record_file_name(record)
-            .unwrap_or("unknown.xml");
+        let file_name = database.record_file_name(record).unwrap_or("unknown.xml");
 
         // Convert path separators and add .xml extension
         let output_path = output.join(file_name.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -1075,7 +1215,11 @@ fn cmd_dcb_extract(input: &PathBuf, output: &PathBuf, filter: Option<&str>) -> R
 fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
     use svarog::chf::parts::ChfData;
 
-    println!("Processing CHF: {} -> {}", input.display(), output.display());
+    println!(
+        "Processing CHF: {} -> {}",
+        input.display(),
+        output.display()
+    );
 
     let chf = if input.extension().and_then(|e| e.to_str()) == Some("chf") {
         ChfFile::from_chf(input).context("Failed to read CHF file")?
@@ -1083,7 +1227,11 @@ fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
         ChfFile::from_bin(input, true).context("Failed to read BIN file")?
     };
 
-    println!("Loaded CHF: {} bytes, modded: {}", chf.data().len(), chf.is_modded());
+    println!(
+        "Loaded CHF: {} bytes, modded: {}",
+        chf.data().len(),
+        chf.is_modded()
+    );
 
     // Parse and display character data
     if let Ok(data) = ChfData::parse(chf.data()) {
@@ -1095,10 +1243,7 @@ fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
             let blend_count = blends.iter().filter(|b| !b.is_zero()).count();
             if blend_count > 0 {
                 active_blends += blend_count;
-                println!(
-                    "  {}: {} active blends",
-                    face_part, blend_count
-                );
+                println!("  {}: {} active blends", face_part, blend_count);
             }
         }
         println!("DNA: {} total active blends", active_blends);
@@ -1115,9 +1260,11 @@ fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
     }
 
     if output.extension().and_then(|e| e.to_str()) == Some("chf") {
-        chf.write_to_chf(output).context("Failed to write CHF file")?;
+        chf.write_to_chf(output)
+            .context("Failed to write CHF file")?;
     } else {
-        chf.write_to_bin(output).context("Failed to write BIN file")?;
+        chf.write_to_bin(output)
+            .context("Failed to write BIN file")?;
     }
 
     println!("Output written");
@@ -1203,4 +1350,338 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     } else {
         name_lower.contains(&pattern_lower)
     }
+}
+
+/// Decode file data to text, handling CryXML.
+fn decode_to_text(data: &[u8]) -> String {
+    if CryXml::is_cryxml(data) {
+        if let Ok(cryxml) = CryXml::parse(data) {
+            if let Ok(xml) = cryxml.to_xml_string() {
+                return xml;
+            }
+        }
+    }
+    String::from_utf8_lossy(data).to_string()
+}
+
+/// Compare two P4K archives.
+fn cmd_p4k_compare(
+    p4k1: &PathBuf,
+    p4k2: &PathBuf,
+    added_only: bool,
+    removed_only: bool,
+    modified_only: bool,
+    show_diff: bool,
+    filter: Option<&str>,
+) -> Result<()> {
+    use svarog::p4k::{compare_archives, is_text_file, P4kArchive};
+    use svarog_common::{generate_unified_diff, DiffLineKind};
+
+    println!("Comparing P4K archives:");
+    println!("  Old: {}", p4k1.display());
+    println!("  New: {}", p4k2.display());
+
+    let start = Instant::now();
+
+    println!("Opening archives...");
+    let old_archive = P4kArchive::open(p4k1).context("Failed to open old P4K")?;
+    let new_archive = P4kArchive::open(p4k2).context("Failed to open new P4K")?;
+
+    println!("Comparing {} vs {} files...", old_archive.entry_count(), new_archive.entry_count());
+    let result = compare_archives(&old_archive, &new_archive);
+
+    println!(
+        "\nComparison complete in {:?}",
+        start.elapsed()
+    );
+
+    let show_all = !added_only && !removed_only && !modified_only;
+
+    // Print summary
+    println!(
+        "\n  \x1b[32m+{} added\x1b[0m, \x1b[31m-{} removed\x1b[0m, \x1b[33m~{} modified\x1b[0m\n",
+        result.added.len(),
+        result.removed.len(),
+        result.modified.len()
+    );
+
+    // Print added files
+    if show_all || added_only {
+        for item in &result.added {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.path) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[32m+ {}\x1b[0m ({} bytes)",
+                item.path,
+                item.size_new.unwrap_or(0)
+            );
+        }
+    }
+
+    // Print removed files
+    if show_all || removed_only {
+        for item in &result.removed {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.path) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[31m- {}\x1b[0m ({} bytes)",
+                item.path,
+                item.size_old.unwrap_or(0)
+            );
+        }
+    }
+
+    // Print modified files
+    if show_all || modified_only {
+        for item in &result.modified {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.path) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[33m~ {}\x1b[0m ({} -> {} bytes)",
+                item.path,
+                item.size_old.unwrap_or(0),
+                item.size_new.unwrap_or(0)
+            );
+
+            // Show diff for text files if requested
+            if show_diff && is_text_file(&item.path) {
+                if let (Some(old_entry), Some(new_entry)) = (
+                    old_archive.find(&item.path),
+                    new_archive.find(&item.path),
+                ) {
+                    if let (Ok(old_data), Ok(new_data)) =
+                        (old_archive.read(&old_entry), new_archive.read(&new_entry))
+                    {
+                        let old_text = decode_to_text(&old_data);
+                        let new_text = decode_to_text(&new_data);
+
+                        let diff = generate_unified_diff(
+                            &old_text,
+                            &new_text,
+                            &format!("a/{}", item.path),
+                            &format!("b/{}", item.path),
+                            3,
+                        );
+
+                        for line in &diff.lines {
+                            let colored = match line.kind {
+                                DiffLineKind::Added => format!("\x1b[32m{}\x1b[0m", line.content),
+                                DiffLineKind::Removed => format!("\x1b[31m{}\x1b[0m", line.content),
+                                DiffLineKind::Header => format!("\x1b[36m{}\x1b[0m", line.content),
+                                DiffLineKind::Context => line.content.clone(),
+                            };
+                            println!("{}", colored);
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Compare two DCB databases.
+/// Load DCB data from a file path, extracting from P4K if necessary
+fn load_dcb_data(path: &PathBuf) -> Result<Vec<u8>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    if ext.eq_ignore_ascii_case("p4k") {
+        // Load from P4K archive
+        let archive = P4kArchive::open(path).context("Failed to open P4K archive")?;
+
+        // Try to find DCB file inside
+        let dcb_names = ["Data/Game.dcb", "Data/Game2.dcb", "Game.dcb", "Game2.dcb"];
+        for name in &dcb_names {
+            if let Some(entry) = archive.find(name) {
+                let dcb_data = archive.read(&entry).context("Failed to read DCB from P4K")?;
+                println!("  (extracted {} from P4K)", name);
+                return Ok(dcb_data);
+            }
+        }
+        anyhow::bail!("No DCB file found in P4K archive (tried: {:?})", dcb_names);
+    } else {
+        // Load directly
+        fs::read(path).context("Failed to read DCB file")
+    }
+}
+
+fn cmd_dcb_compare(
+    dcb1: &PathBuf,
+    dcb2: &PathBuf,
+    scope: &str,
+    added_only: bool,
+    removed_only: bool,
+    modified_only: bool,
+    show_diff: bool,
+    filter: Option<&str>,
+) -> Result<()> {
+    use svarog::datacore::{
+        compare_databases, get_enum_content, get_record_content, get_struct_content,
+        DcbCompareScope, DcbItemType,
+    };
+    use svarog_common::{generate_unified_diff, DiffLineKind};
+
+    println!("Comparing DCB databases:");
+    println!("  Old: {}", dcb1.display());
+    println!("  New: {}", dcb2.display());
+
+    let start = Instant::now();
+
+    println!("Loading databases...");
+    let old_data = load_dcb_data(dcb1)?;
+    let new_data = load_dcb_data(dcb2)?;
+
+    let old_db = DataCoreDatabase::parse(&old_data).context("Failed to parse old DCB")?;
+    let new_db = DataCoreDatabase::parse(&new_data).context("Failed to parse new DCB")?;
+
+    let compare_scope = DcbCompareScope::from_str(scope);
+
+    println!("Comparing (scope: {:?})...", compare_scope);
+    let result = compare_databases(&old_db, &new_db, compare_scope);
+
+    println!("\nComparison complete in {:?}", start.elapsed());
+    println!(
+        "  Old: {} records, {} structs, {} enums",
+        result.old_counts.0, result.old_counts.1, result.old_counts.2
+    );
+    println!(
+        "  New: {} records, {} structs, {} enums",
+        result.new_counts.0, result.new_counts.1, result.new_counts.2
+    );
+
+    let show_all = !added_only && !removed_only && !modified_only;
+
+    // Print summary
+    println!(
+        "\n  \x1b[32m+{} added\x1b[0m, \x1b[31m-{} removed\x1b[0m, \x1b[33m~{} modified\x1b[0m\n",
+        result.added.len(),
+        result.removed.len(),
+        result.modified.len()
+    );
+
+    // Print added items
+    if show_all || added_only {
+        for item in &result.added {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.name) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[32m+ [{}] {}\x1b[0m",
+                item.item_type, item.name
+            );
+
+            if show_diff {
+                if let Some(new_idx) = item.new_index {
+                    let content = match item.item_type {
+                        DcbItemType::Record => get_record_content(&new_db, new_idx),
+                        DcbItemType::Struct => get_struct_content(&new_db, new_idx),
+                        DcbItemType::Enum => get_enum_content(&new_db, new_idx),
+                    };
+                    if let Some(content) = content {
+                        for line in content.lines() {
+                            println!("\x1b[32m+{}\x1b[0m", line);
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+    }
+
+    // Print removed items
+    if show_all || removed_only {
+        for item in &result.removed {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.name) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[31m- [{}] {}\x1b[0m",
+                item.item_type, item.name
+            );
+
+            if show_diff {
+                if let Some(old_idx) = item.old_index {
+                    let content = match item.item_type {
+                        DcbItemType::Record => get_record_content(&old_db, old_idx),
+                        DcbItemType::Struct => get_struct_content(&old_db, old_idx),
+                        DcbItemType::Enum => get_enum_content(&old_db, old_idx),
+                    };
+                    if let Some(content) = content {
+                        for line in content.lines() {
+                            println!("\x1b[31m-{}\x1b[0m", line);
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+    }
+
+    // Print modified items
+    if show_all || modified_only {
+        for item in &result.modified {
+            if let Some(pattern) = filter {
+                if !glob_match(pattern, &item.name) {
+                    continue;
+                }
+            }
+            println!(
+                "\x1b[33m~ [{}] {}\x1b[0m",
+                item.item_type, item.name
+            );
+
+            if show_diff {
+                if let (Some(old_idx), Some(new_idx)) = (item.old_index, item.new_index) {
+                    let old_content = match item.item_type {
+                        DcbItemType::Record => get_record_content(&old_db, old_idx),
+                        DcbItemType::Struct => get_struct_content(&old_db, old_idx),
+                        DcbItemType::Enum => get_enum_content(&old_db, old_idx),
+                    };
+                    let new_content = match item.item_type {
+                        DcbItemType::Record => get_record_content(&new_db, new_idx),
+                        DcbItemType::Struct => get_struct_content(&new_db, new_idx),
+                        DcbItemType::Enum => get_enum_content(&new_db, new_idx),
+                    };
+
+                    if let (Some(old_content), Some(new_content)) = (old_content, new_content) {
+                        let diff = generate_unified_diff(
+                            &old_content,
+                            &new_content,
+                            &format!("a/{}", item.name),
+                            &format!("b/{}", item.name),
+                            3,
+                        );
+
+                        for line in &diff.lines {
+                            let colored = match line.kind {
+                                DiffLineKind::Added => format!("\x1b[32m{}\x1b[0m", line.content),
+                                DiffLineKind::Removed => format!("\x1b[31m{}\x1b[0m", line.content),
+                                DiffLineKind::Header => format!("\x1b[36m{}\x1b[0m", line.content),
+                                DiffLineKind::Context => line.content.clone(),
+                            };
+                            println!("{}", colored);
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

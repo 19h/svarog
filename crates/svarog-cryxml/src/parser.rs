@@ -22,7 +22,8 @@ pub struct CryXml {
 impl CryXml {
     /// Check if data is a CryXmlB file by checking the magic bytes.
     pub fn is_cryxml(data: &[u8]) -> bool {
-        data.len() >= CryXmlHeader::MAGIC_LEN && &data[..CryXmlHeader::MAGIC_LEN] == CryXmlHeader::MAGIC
+        data.len() >= CryXmlHeader::MAGIC_LEN
+            && &data[..CryXmlHeader::MAGIC_LEN] == CryXmlHeader::MAGIC
     }
 
     /// Parse a CryXmlB file from bytes.

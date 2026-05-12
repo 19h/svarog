@@ -245,7 +245,10 @@ impl<'a> BinaryReader<'a> {
     }
 
     /// Expect a specific value or return an error.
-    pub fn expect<T: PartialEq + std::fmt::Debug + FromBytes>(&mut self, expected: T) -> Result<()> {
+    pub fn expect<T: PartialEq + std::fmt::Debug + FromBytes>(
+        &mut self,
+        expected: T,
+    ) -> Result<()> {
         let actual = self.read_struct::<T>()?;
         if actual != expected {
             return Err(Error::ExpectedValue {

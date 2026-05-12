@@ -191,7 +191,14 @@ impl<'a> CHeaderExporter<'a> {
         let mut enum_seen = HashSet::new();
 
         for &r in roots {
-            self.dfs(r, &mut temp, &mut perm, &mut order, &mut enums, &mut enum_seen);
+            self.dfs(
+                r,
+                &mut temp,
+                &mut perm,
+                &mut order,
+                &mut enums,
+                &mut enum_seen,
+            );
         }
 
         (order, enums)
@@ -296,7 +303,9 @@ impl<'a> CHeaderExporter<'a> {
 
         let name = self.db.struct_name(struct_index).unwrap_or("Unknown");
         let parent_name = if parent_index >= 0 {
-            self.db.struct_name(parent_index as usize).unwrap_or("Unknown")
+            self.db
+                .struct_name(parent_index as usize)
+                .unwrap_or("Unknown")
         } else {
             ""
         };
@@ -381,43 +390,62 @@ impl<'a> CHeaderExporter<'a> {
     }
 
     /// Describe a DataCore type for C header export.
-    fn describe_type(&self, prop: &crate::structs::DataCorePropertyDefinition) -> String {
-        let struct_idx = prop.struct_index;
+    fn describe_type(&self, prop: &crate::structs::DataCorePropertyDefinition) -> TypeDescriptor {
+        let struct_idx = prop.struct_index as usize;
         let data_type = prop.data_type;
         let Some(dt) = DataType::from_u16(data_type) else {
-            return format!("uint8_t /* unknown 0x{:04X} */", data_type);
+            return TypeDescriptor::with_target(
+                "uint8_t",
+                Some(format!("unknown 0x{:04X}", data_type)),
+            );
         };
 
         match dt {
-            DataType::Boolean => "bool".to_string(),
-            DataType::SByte => "int8_t".to_string(),
-            DataType::Int16 => "int16_t".to_string(),
-            DataType::Int32 => "int32_t".to_string(),
-            DataType::Int64 => "int64_t".to_string(),
-            DataType::Byte => "uint8_t".to_string(),
-            DataType::UInt16 => "uint16_t".to_string(),
-            DataType::UInt32 => "uint32_t".to_string(),
-            DataType::UInt64 => "uint64_t".to_string(),
-            DataType::Single => "float".to_string(),
-            DataType::Double => "double".to_string(),
-            DataType::String => "dc_string".to_string(),
-            DataType::Locale => "dc_locale".to_string(),
-            DataType::Guid => "dc_guid".to_string(),
-            DataType::EnumChoice => self
-                .db
-                .enum_name(struct_idx as usize)
-                .unwrap_or("int32_t")
-                .to_string(),
+            DataType::Boolean => TypeDescriptor::simple("bool"),
+            DataType::SByte => TypeDescriptor::simple("int8_t"),
+            DataType::Int16 => TypeDescriptor::simple("int16_t"),
+            DataType::Int32 => TypeDescriptor::simple("int32_t"),
+            DataType::Int64 => TypeDescriptor::simple("int64_t"),
+            DataType::Byte => TypeDescriptor::simple("uint8_t"),
+            DataType::UInt16 => TypeDescriptor::simple("uint16_t"),
+            DataType::UInt32 => TypeDescriptor::simple("uint32_t"),
+            DataType::UInt64 => TypeDescriptor::simple("uint64_t"),
+            DataType::Single => TypeDescriptor::simple("float"),
+            DataType::Double => TypeDescriptor::simple("double"),
+            DataType::String => TypeDescriptor::simple("dc_string"),
+            DataType::Locale => TypeDescriptor::simple("dc_locale"),
+            DataType::Guid => TypeDescriptor::simple("dc_guid"),
+            DataType::EnumChoice => TypeDescriptor::simple(
+                self.db
+                    .enum_name(struct_idx)
+                    .unwrap_or("int32_t")
+                    .to_string(),
+            ),
             DataType::Class => {
+                let target = self.db.struct_name(struct_idx).unwrap_or("Unknown");
+                TypeDescriptor::simple(format!("struct {}", target))
+            }
+            DataType::StrongPointer => {
                 let target = self
                     .db
-                    .struct_name(struct_idx as usize)
-                    .unwrap_or("Unknown");
-                format!("struct {}", target)
+                    .struct_name(struct_idx)
+                    .map(|t| format!("struct {}", t));
+                TypeDescriptor::with_target("dc_strong_ptr", target)
             }
-            DataType::StrongPointer => "dc_strong_ptr".to_string(),
-            DataType::WeakPointer => "dc_weak_ptr".to_string(),
-            DataType::Reference => "dc_record_ref".to_string(),
+            DataType::WeakPointer => {
+                let target = self
+                    .db
+                    .struct_name(struct_idx)
+                    .map(|t| format!("struct {}", t));
+                TypeDescriptor::with_target("dc_weak_ptr", target)
+            }
+            DataType::Reference => {
+                let target = self
+                    .db
+                    .struct_name(struct_idx)
+                    .map(|t| format!("struct {}", t));
+                TypeDescriptor::with_target("dc_record_ref", target)
+            }
         }
     }
 
@@ -452,14 +480,14 @@ impl<'a> CHeaderExporter<'a> {
         for prop in props {
             let raw_name = self.db.property_name(prop).unwrap_or("Unknown");
             let name = escape_c_keyword(raw_name);
-            let base_type = self.describe_type(prop);
+            let type_desc = self.describe_type(prop);
             let size = self.property_size(prop);
 
             // Arrays use dc_array struct, not flexible array members
             let type_name = if prop.is_array() {
-                format!("dc_array  /* {} */", base_type)
+                type_desc.render_array()
             } else {
-                base_type
+                type_desc.render_value()
             };
 
             layout.push(FieldLayout {
@@ -494,23 +522,111 @@ impl<'a> CHeaderExporter<'a> {
 /// C and C++ reserved keywords that cannot be used as identifiers
 const C_KEYWORDS: &[&str] = &[
     // C keywords
-    "auto", "break", "case", "char", "const", "continue", "default", "do",
-    "double", "else", "enum", "extern", "float", "for", "goto", "if",
-    "inline", "int", "long", "register", "restrict", "return", "short",
-    "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
-    "unsigned", "void", "volatile", "while", "_Alignas", "_Alignof",
-    "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn",
-    "_Static_assert", "_Thread_local",
+    "auto",
+    "break",
+    "case",
+    "char",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "struct",
+    "switch",
+    "typedef",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Bool",
+    "_Complex",
+    "_Generic",
+    "_Imaginary",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
     // C++ keywords (IDA uses C++ mode)
-    "alignas", "alignof", "and", "and_eq", "asm", "bitand", "bitor", "bool",
-    "catch", "char16_t", "char32_t", "class", "compl", "concept", "consteval",
-    "constexpr", "constinit", "const_cast", "co_await", "co_return", "co_yield",
-    "decltype", "delete", "dynamic_cast", "explicit", "export", "false",
-    "friend", "module", "mutable", "namespace", "new", "noexcept", "not",
-    "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected",
-    "public", "reinterpret_cast", "requires", "static_assert", "static_cast",
-    "template", "this", "thread_local", "throw", "true", "try", "typeid",
-    "typename", "using", "virtual", "wchar_t", "xor", "xor_eq", "import",
+    "alignas",
+    "alignof",
+    "and",
+    "and_eq",
+    "asm",
+    "bitand",
+    "bitor",
+    "bool",
+    "catch",
+    "char16_t",
+    "char32_t",
+    "class",
+    "compl",
+    "concept",
+    "consteval",
+    "constexpr",
+    "constinit",
+    "const_cast",
+    "co_await",
+    "co_return",
+    "co_yield",
+    "decltype",
+    "delete",
+    "dynamic_cast",
+    "explicit",
+    "export",
+    "false",
+    "friend",
+    "module",
+    "mutable",
+    "namespace",
+    "new",
+    "noexcept",
+    "not",
+    "not_eq",
+    "nullptr",
+    "operator",
+    "or",
+    "or_eq",
+    "private",
+    "protected",
+    "public",
+    "reinterpret_cast",
+    "requires",
+    "static_assert",
+    "static_cast",
+    "template",
+    "this",
+    "thread_local",
+    "throw",
+    "true",
+    "try",
+    "typeid",
+    "typename",
+    "using",
+    "virtual",
+    "wchar_t",
+    "xor",
+    "xor_eq",
+    "import",
 ];
 
 /// Escape C reserved keywords by appending an underscore
@@ -519,6 +635,42 @@ fn escape_c_keyword(name: &str) -> String {
         format!("{}_", name)
     } else {
         name.to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TypeDescriptor {
+    base: String,
+    target: Option<String>,
+}
+
+impl TypeDescriptor {
+    fn simple<S: Into<String>>(base: S) -> Self {
+        Self {
+            base: base.into(),
+            target: None,
+        }
+    }
+
+    fn with_target<S: Into<String>>(base: S, target: Option<String>) -> Self {
+        Self {
+            base: base.into(),
+            target,
+        }
+    }
+
+    fn render_value(&self) -> String {
+        match &self.target {
+            Some(target) => format!("{} /* {} */", self.base, target),
+            None => self.base.clone(),
+        }
+    }
+
+    fn render_array(&self) -> String {
+        match &self.target {
+            Some(target) => format!("dc_array  /* {} -> {} */", self.base, target),
+            None => format!("dc_array  /* {} */", self.base),
+        }
     }
 }
 
@@ -547,5 +699,19 @@ mod tests {
         // Preamble is self-contained with inline typedefs (for IDA compatibility)
         assert!(C_HEADER_PREAMBLE.contains("typedef signed char int8_t"));
         assert!(C_HEADER_PREAMBLE.contains("typedef unsigned char bool"));
+    }
+
+    #[test]
+    fn type_descriptor_renders_targets() {
+        let desc = TypeDescriptor::with_target("dc_strong_ptr", Some("struct SExample".into()));
+        assert_eq!(desc.render_value(), "dc_strong_ptr /* struct SExample */");
+        assert_eq!(
+            desc.render_array(),
+            "dc_array  /* dc_strong_ptr -> struct SExample */"
+        );
+
+        let simple = TypeDescriptor::simple("float");
+        assert_eq!(simple.render_value(), "float");
+        assert_eq!(simple.render_array(), "dc_array  /* float */");
     }
 }

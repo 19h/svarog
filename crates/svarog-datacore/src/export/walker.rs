@@ -23,7 +23,10 @@ pub struct RecordWalker<'a> {
 
 impl<'a> RecordWalker<'a> {
     /// Walk a record and return a map of (struct_index, instance_index) to pointer ID.
-    pub fn walk(database: &'a DataCoreDatabase, record: &DataCoreRecord) -> HashMap<(i32, i32), usize> {
+    pub fn walk(
+        database: &'a DataCoreDatabase,
+        record: &DataCoreRecord,
+    ) -> HashMap<(i32, i32), usize> {
         let mut walker = Self {
             database,
             weak_pointers: HashMap::new(),
@@ -36,7 +39,9 @@ impl<'a> RecordWalker<'a> {
     }
 
     fn walk_instance(&mut self, struct_index: i32, instance_index: usize) {
-        let mut reader = self.database.get_instance_reader(struct_index as usize, instance_index);
+        let mut reader = self
+            .database
+            .get_instance_reader(struct_index as usize, instance_index);
         self.walk_struct(struct_index, &mut reader);
     }
 
@@ -59,7 +64,12 @@ impl<'a> RecordWalker<'a> {
         }
     }
 
-    fn walk_attribute(&mut self, data_type: DataType, struct_index: i32, reader: &mut BinaryReader<'_>) {
+    fn walk_attribute(
+        &mut self,
+        data_type: DataType,
+        struct_index: i32,
+        reader: &mut BinaryReader<'_>,
+    ) {
         match data_type {
             DataType::Reference => {
                 if let Ok(reference) = reader.read_struct::<DataCoreReference>() {
@@ -86,7 +96,12 @@ impl<'a> RecordWalker<'a> {
         }
     }
 
-    fn walk_array(&mut self, data_type: DataType, struct_index: i32, reader: &mut BinaryReader<'_>) {
+    fn walk_array(
+        &mut self,
+        data_type: DataType,
+        struct_index: i32,
+        reader: &mut BinaryReader<'_>,
+    ) {
         let count = reader.read_i32().unwrap_or(0);
         let first_index = reader.read_i32().unwrap_or(0);
 

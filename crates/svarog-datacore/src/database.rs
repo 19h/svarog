@@ -318,11 +318,8 @@ impl DataCoreDatabase {
         );
 
         // Build record map with FxHash
-        let record_map: FxHashMap<CigGuid, usize> = records
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.id, i))
-            .collect();
+        let record_map: FxHashMap<CigGuid, usize> =
+            records.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
 
         // Compute main records
         let main_records = Self::compute_main_records_fast(&records);
@@ -332,12 +329,19 @@ impl DataCoreDatabase {
 
         // Build string caches
         let string_cache_1 = Self::build_string_cache_fast(
-            unsafe { std::slice::from_raw_parts(data_ptr.add(string_table_1_offset), string_table_1_len) },
+            unsafe {
+                std::slice::from_raw_parts(data_ptr.add(string_table_1_offset), string_table_1_len)
+            },
             &string_arena,
         );
         let string_cache_2 = if version >= 6 {
             Self::build_string_cache_fast(
-                unsafe { std::slice::from_raw_parts(data_ptr.add(string_table_2_offset), string_table_2_len) },
+                unsafe {
+                    std::slice::from_raw_parts(
+                        data_ptr.add(string_table_2_offset),
+                        string_table_2_len,
+                    )
+                },
                 &string_arena,
             )
         } else {
@@ -511,7 +515,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.reference_offset + index * std::mem::size_of::<DataCoreReference>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCoreReference>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCoreReference>(),
+            )
+        };
         DataCoreReference::read_from_bytes(data).ok()
     }
 
@@ -521,7 +530,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.strong_offset + index * std::mem::size_of::<DataCorePointer>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCorePointer>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCorePointer>(),
+            )
+        };
         DataCorePointer::read_from_bytes(data).ok()
     }
 
@@ -531,7 +545,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.weak_offset + index * std::mem::size_of::<DataCorePointer>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCorePointer>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCorePointer>(),
+            )
+        };
         DataCorePointer::read_from_bytes(data).ok()
     }
 
@@ -551,7 +570,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.string_id_offset + index * std::mem::size_of::<DataCoreStringId>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCoreStringId>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCoreStringId>(),
+            )
+        };
         DataCoreStringId::read_from_bytes(data).ok()
     }
 
@@ -561,7 +585,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.locale_offset + index * std::mem::size_of::<DataCoreStringId>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCoreStringId>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCoreStringId>(),
+            )
+        };
         DataCoreStringId::read_from_bytes(data).ok()
     }
 
@@ -571,7 +600,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.enum_value_offset + index * std::mem::size_of::<DataCoreStringId>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCoreStringId>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCoreStringId>(),
+            )
+        };
         DataCoreStringId::read_from_bytes(data).ok()
     }
 
@@ -581,7 +615,12 @@ impl DataCoreDatabase {
             return None;
         }
         let offset = self.enum_option_offset + index * std::mem::size_of::<DataCoreStringId2>();
-        let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), std::mem::size_of::<DataCoreStringId2>()) };
+        let data = unsafe {
+            std::slice::from_raw_parts(
+                self.data.add(offset),
+                std::mem::size_of::<DataCoreStringId2>(),
+            )
+        };
         DataCoreStringId2::read_from_bytes(data).ok()
     }
 
@@ -628,7 +667,9 @@ impl DataCoreDatabase {
         }
         let offset = self.int64_offset + index * 8;
         let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), 8) };
-        Some(i64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        Some(i64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]))
     }
 
     #[inline]
@@ -666,7 +707,9 @@ impl DataCoreDatabase {
         }
         let offset = self.uint64_offset + index * 8;
         let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), 8) };
-        Some(u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        Some(u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]))
     }
 
     #[inline]
@@ -686,7 +729,9 @@ impl DataCoreDatabase {
         }
         let offset = self.double_offset + index * 8;
         let data = unsafe { std::slice::from_raw_parts(self.data.add(offset), 8) };
-        Some(f64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]))
+        Some(f64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]))
     }
 
     #[inline]
@@ -826,9 +871,7 @@ impl DataCoreDatabase {
             PoolType::EnumOption => (self.enum_option_offset, self.enum_option_count, 4),
         };
 
-        unsafe {
-            std::slice::from_raw_parts(self.data.add(offset), count * elem_size)
-        }
+        unsafe { std::slice::from_raw_parts(self.data.add(offset), count * elem_size) }
     }
 
     fn build_string_cache_fast(data: &[u8], arena: &Bump) -> FxHashMap<i32, *const str> {

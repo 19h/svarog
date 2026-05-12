@@ -80,7 +80,10 @@ impl InstanceRef {
     /// Create a new instance reference.
     #[inline]
     pub fn new(struct_index: u32, instance_index: u32) -> Self {
-        Self { struct_index, instance_index }
+        Self {
+            struct_index,
+            instance_index,
+        }
     }
 }
 
@@ -308,7 +311,9 @@ impl std::fmt::Display for Value<'_> {
                 write!(f, "StrongPtr({}, {})", r.struct_index, r.instance_index)
             }
             Value::StrongPointer(None) => write!(f, "StrongPtr(null)"),
-            Value::WeakPointer(Some(r)) => write!(f, "WeakPtr({}, {})", r.struct_index, r.instance_index),
+            Value::WeakPointer(Some(r)) => {
+                write!(f, "WeakPtr({}, {})", r.struct_index, r.instance_index)
+            }
             Value::WeakPointer(None) => write!(f, "WeakPtr(null)"),
             Value::Reference(Some(r)) => write!(f, "Ref({})", r.guid),
             Value::Reference(None) => write!(f, "Ref(null)"),

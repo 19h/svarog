@@ -95,7 +95,14 @@ impl CryXmlBuilder {
         let mut child_indices: Vec<i32> = Vec::new();
         let mut attributes: Vec<CryXmlAttribute> = Vec::new();
 
-        self.flatten_node(&self.root, -1, &mut nodes, &mut child_indices, &mut attributes, &string_table)?;
+        self.flatten_node(
+            &self.root,
+            -1,
+            &mut nodes,
+            &mut child_indices,
+            &mut attributes,
+            &string_table,
+        )?;
 
         // Step 3: Calculate positions
         let header_size = std::mem::size_of::<CryXmlHeader>() as u32;
@@ -119,7 +126,11 @@ impl CryXmlBuilder {
         let string_data_size = string_data.len() as u32;
 
         // Total size for xml_size field (everything after magic)
-        let xml_size = header_size + node_table_size + child_table_size + attribute_table_size + string_data_size;
+        let xml_size = header_size
+            + node_table_size
+            + child_table_size
+            + attribute_table_size
+            + string_data_size;
 
         // Step 4: Build header
         let header = CryXmlHeader {
@@ -200,20 +211,20 @@ impl CryXmlBuilder {
         // Add attributes
         for (key, value) in &node.attributes {
             attributes.push(CryXmlAttribute {
-                key_string_offset: string_table.get(key).ok_or_else(|| {
-                    Error::Xml(format!("string not found in table: {}", key))
-                })?,
-                value_string_offset: string_table.get(value).ok_or_else(|| {
-                    Error::Xml(format!("string not found in table: {}", value))
-                })?,
+                key_string_offset: string_table
+                    .get(key)
+                    .ok_or_else(|| Error::Xml(format!("string not found in table: {}", key)))?,
+                value_string_offset: string_table
+                    .get(value)
+                    .ok_or_else(|| Error::Xml(format!("string not found in table: {}", value)))?,
             });
         }
 
         // Create node (with placeholder child info)
         let cryxml_node = CryXmlNode {
-            tag_string_offset: string_table.get(&node.tag).ok_or_else(|| {
-                Error::Xml(format!("string not found in table: {}", node.tag))
-            })?,
+            tag_string_offset: string_table
+                .get(&node.tag)
+                .ok_or_else(|| Error::Xml(format!("string not found in table: {}", node.tag)))?,
             content_string_offset: string_table.get(&node.content).ok_or_else(|| {
                 Error::Xml(format!("string not found in table: {}", node.content))
             })?,
@@ -298,8 +309,7 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let root = BuilderNode::new("Root")
-            .attr("version", "1.0");
+        let root = BuilderNode::new("Root").attr("version", "1.0");
 
         let builder = CryXmlBuilder::new(root);
         let bytes = builder.build().unwrap();
@@ -317,10 +327,13 @@ mod tests {
     fn test_builder_with_children() {
         let root = BuilderNode::new("Material")
             .attr("Name", "TestMaterial")
-            .child(BuilderNode::new("Textures")
-                .child(BuilderNode::new("Texture")
-                    .attr("Map", "Diffuse")
-                    .attr("File", "test.dds")));
+            .child(
+                BuilderNode::new("Textures").child(
+                    BuilderNode::new("Texture")
+                        .attr("Map", "Diffuse")
+                        .attr("File", "test.dds"),
+                ),
+            );
 
         let builder = CryXmlBuilder::new(root);
         let bytes = builder.build().unwrap();
@@ -328,7 +341,10 @@ mod tests {
         let parsed = CryXml::parse(&bytes).unwrap();
         let root = parsed.root().unwrap();
 
-        assert_eq!(parsed.get_string(root.tag_string_offset).unwrap(), "Material");
+        assert_eq!(
+            parsed.get_string(root.tag_string_offset).unwrap(),
+            "Material"
+        );
         // Copy from packed struct to avoid alignment issues
         let attr_count = root.attribute_count;
         let child_count = root.child_count;
@@ -338,7 +354,10 @@ mod tests {
         // Check child
         let children: Vec<_> = parsed.children(root).collect();
         assert_eq!(children.len(), 1);
-        assert_eq!(parsed.get_string(children[0].tag_string_offset).unwrap(), "Textures");
+        assert_eq!(
+            parsed.get_string(children[0].tag_string_offset).unwrap(),
+            "Textures"
+        );
     }
 
     #[test]
@@ -346,12 +365,16 @@ mod tests {
         let original = BuilderNode::new("Config")
             .attr("version", "2.0")
             .attr("name", "test")
-            .child(BuilderNode::new("Setting")
-                .attr("key", "option1")
-                .attr("value", "enabled"))
-            .child(BuilderNode::new("Setting")
-                .attr("key", "option2")
-                .attr("value", "disabled"));
+            .child(
+                BuilderNode::new("Setting")
+                    .attr("key", "option1")
+                    .attr("value", "enabled"),
+            )
+            .child(
+                BuilderNode::new("Setting")
+                    .attr("key", "option2")
+                    .attr("value", "disabled"),
+            );
 
         let builder = CryXmlBuilder::new(original);
         let bytes = builder.build().unwrap();
@@ -370,10 +393,22 @@ mod tests {
 
         // Verify attributes
         let attrs = parsed.node_attributes(root);
-        assert_eq!(parsed.get_string(attrs[0].key_string_offset).unwrap(), "version");
-        assert_eq!(parsed.get_string(attrs[0].value_string_offset).unwrap(), "2.0");
-        assert_eq!(parsed.get_string(attrs[1].key_string_offset).unwrap(), "name");
-        assert_eq!(parsed.get_string(attrs[1].value_string_offset).unwrap(), "test");
+        assert_eq!(
+            parsed.get_string(attrs[0].key_string_offset).unwrap(),
+            "version"
+        );
+        assert_eq!(
+            parsed.get_string(attrs[0].value_string_offset).unwrap(),
+            "2.0"
+        );
+        assert_eq!(
+            parsed.get_string(attrs[1].key_string_offset).unwrap(),
+            "name"
+        );
+        assert_eq!(
+            parsed.get_string(attrs[1].value_string_offset).unwrap(),
+            "test"
+        );
     }
 
     #[test]
@@ -398,7 +433,10 @@ mod tests {
 
         // Verify structure of original
         let root = original.root().unwrap();
-        assert_eq!(original.get_string(root.tag_string_offset).unwrap(), "textures");
+        assert_eq!(
+            original.get_string(root.tag_string_offset).unwrap(),
+            "textures"
+        );
         let child_count = root.child_count;
         assert_eq!(child_count, 88); // 88 texture entries
 
@@ -406,9 +444,14 @@ mod tests {
         let children: Vec<_> = original.children(root).collect();
         assert_eq!(children.len(), 88);
         let first_child = children[0];
-        assert_eq!(original.get_string(first_child.tag_string_offset).unwrap(), "entry");
         assert_eq!(
-            original.get_string(first_child.content_string_offset).unwrap(),
+            original.get_string(first_child.tag_string_offset).unwrap(),
+            "entry"
+        );
+        assert_eq!(
+            original
+                .get_string(first_child.content_string_offset)
+                .unwrap(),
             "EngineAssets/Textures/caustics_sampler.dds"
         );
     }

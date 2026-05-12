@@ -163,6 +163,7 @@
 
 mod builder;
 mod c_header;
+pub mod compare;
 mod database;
 mod error;
 mod instance;
@@ -185,6 +186,11 @@ pub use builder::{DataCoreBuilder, EnumHandle, RecordHandle, StructHandle};
 
 // Export types
 pub use c_header::{CHeaderExporter, C_HEADER_PREAMBLE};
+pub use compare::{
+    compare_databases, compare_databases_with_progress, get_enum_content, get_record_content,
+    get_struct_content, DcbCompareScope, DcbComparisonItem, DcbComparisonResult, DcbItemType,
+    ProgressCallback,
+};
 pub use export::{RecordWalker, XmlExporter};
 
 // Low-level types

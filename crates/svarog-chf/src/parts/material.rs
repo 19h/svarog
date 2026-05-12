@@ -416,7 +416,10 @@ mod tests {
     fn test_sub_material() {
         let mut sub = SubMaterial::new(NameHash::from_str("skin"));
         sub.add_float_param(NameHash::from_str("roughness"), 0.5);
-        sub.add_color_param(NameHash::from_str("tint"), ColorRgba::new(1.0, 0.8, 0.6, 1.0));
+        sub.add_color_param(
+            NameHash::from_str("tint"),
+            ColorRgba::new(1.0, 0.8, 0.6, 1.0),
+        );
 
         assert_eq!(sub.float_params().len(), 1);
         assert_eq!(sub.color_params().len(), 1);

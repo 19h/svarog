@@ -86,7 +86,7 @@ impl DataType {
             Self::Guid => 16,
             Self::String | Self::Locale | Self::EnumChoice => 4, // DataCoreStringId
             Self::StrongPointer | Self::WeakPointer => 8,        // DataCorePointer
-            Self::Reference => 20,                                // DataCoreReference
+            Self::Reference => 20,                               // DataCoreReference
             Self::Class => 0, // Size depends on the struct definition
         }
     }

@@ -2,7 +2,8 @@
 
 #![allow(dead_code)]
 
-use eframe::egui::{self, Color32, Response, RichText, Ui, WidgetText};
+use eframe::egui::{self, Color32, Response, RichText, ScrollArea, Ui, WidgetText};
+use svarog_common::{DiffLineKind, TextDiff};
 
 /// Format bytes into human-readable size
 pub fn format_size(bytes: u64) -> String {
@@ -40,17 +41,22 @@ pub fn progress_bar(ui: &mut Ui, current: usize, total: usize, label: &str) {
 /// Render a search box with clear button
 pub fn search_box(ui: &mut Ui, search: &mut String, placeholder: &str) -> Response {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("?").monospace().color(Color32::from_gray(120)));
+        ui.label(
+            RichText::new("?")
+                .monospace()
+                .color(Color32::from_gray(120)),
+        );
         let response = ui.add(
             egui::TextEdit::singleline(search)
                 .hint_text(placeholder)
-                .desired_width(200.0)
+                .desired_width(200.0),
         );
         if !search.is_empty() && ui.button("x").clicked() {
             search.clear();
         }
         response
-    }).inner
+    })
+    .inner
 }
 
 /// Render a tree node with expand/collapse
@@ -79,9 +85,7 @@ pub fn tree_node<R>(
     });
 
     if *expanded && !is_leaf {
-        ui.indent(id, |ui| {
-            Some(add_contents(ui))
-        }).inner
+        ui.indent(id, |ui| Some(add_contents(ui))).inner
     } else {
         None
     }
@@ -172,12 +176,70 @@ pub fn confirmation_dialog(
 
 /// Styled button for primary actions
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
-    ui.add(egui::Button::new(
-        RichText::new(text).strong()
-    ))
+    ui.add(egui::Button::new(RichText::new(text).strong()))
 }
 
 /// Styled button for secondary actions
 pub fn secondary_button(ui: &mut Ui, text: &str) -> Response {
     ui.button(text)
+}
+
+/// Render a unified diff view with colored lines
+///
+/// - Green background and + prefix for added lines
+/// - Red background and - prefix for removed lines
+/// - Cyan for diff headers (@@, ---, +++)
+/// - Default for context lines
+pub fn render_diff_view(ui: &mut Ui, diff: &TextDiff) {
+    // Colors for diff display
+    let added_bg = Color32::from_rgb(30, 60, 30);
+    let added_fg = Color32::from_rgb(100, 200, 100);
+    let removed_bg = Color32::from_rgb(60, 30, 30);
+    let removed_fg = Color32::from_rgb(200, 100, 100);
+    let header_fg = Color32::from_rgb(100, 200, 200);
+    let context_fg = Color32::from_gray(180);
+
+    // Show summary
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("+{}", diff.additions))
+                .color(added_fg)
+                .monospace(),
+        );
+        ui.label(
+            RichText::new(format!("-{}", diff.deletions))
+                .color(removed_fg)
+                .monospace(),
+        );
+    });
+
+    ui.add_space(4.0);
+
+    // Render diff lines in a scroll area
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+            for line in &diff.lines {
+                let (prefix, bg_color, fg_color) = match line.kind {
+                    DiffLineKind::Added => ("+", Some(added_bg), added_fg),
+                    DiffLineKind::Removed => ("-", Some(removed_bg), removed_fg),
+                    DiffLineKind::Header => ("", None, header_fg),
+                    DiffLineKind::Context => (" ", None, context_fg),
+                };
+
+                let text = format!("{}{}", prefix, line.content);
+
+                if let Some(bg) = bg_color {
+                    egui::Frame::none()
+                        .fill(bg)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&text).monospace().color(fg_color));
+                        });
+                } else {
+                    ui.label(RichText::new(&text).monospace().color(fg_color));
+                }
+            }
+        });
 }

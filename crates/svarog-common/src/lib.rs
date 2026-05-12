@@ -6,6 +6,7 @@
 //! - [`CigGuid`] - Star Citizen's custom GUID format
 //! - [`crc`] - CRC32C hashing utilities
 //! - [`simd`] - SIMD-accelerated operations (AVX2, SSE2, NEON)
+//! - [`diff`] - Text diffing utilities for file comparison
 //! - Color types and other common structures
 
 mod error;
@@ -13,11 +14,16 @@ mod guid;
 mod reader;
 
 pub mod crc;
+pub mod diff;
 pub mod simd;
 
 pub use error::{Error, Result};
 pub use guid::CigGuid;
 pub use reader::BinaryReader;
+
+// Re-export diff types for convenience
+pub use diff::{generate_added_diff, generate_removed_diff, generate_unified_diff};
+pub use diff::{DiffLine, DiffLineKind, DiffStatus, TextDiff};
 
 /// Re-export zerocopy traits for convenience
 pub use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};

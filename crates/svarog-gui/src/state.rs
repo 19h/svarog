@@ -6,22 +6,46 @@ use crossbeam_channel::{Receiver, Sender};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use svarog::datacore::DataCoreDatabase;
-use svarog::p4k::P4kArchive;
+use svarog::datacore::{
+    DataCoreDatabase, DcbCompareScope, DcbComparisonResult, DcbItemType,
+};
+use svarog::p4k::{P4kArchive, P4kComparisonResult};
+use svarog_common::TextDiff;
 
 /// Messages from background workers to UI
 #[derive(Debug)]
 pub enum WorkerMessage {
     P4kLoaded(Result<Arc<P4kArchive>, String>),
-    P4kProgress { current: usize, total: usize, stage: String },
-    DataCoreLoaded(Result<Arc<DataCoreDatabase>, String>),
-    DataCoreProgress { current: usize, total: usize },
+    P4kProgress {
+        current: usize,
+        total: usize,
+        stage: String,
+    },
+    DataCoreLoaded(Result<(Arc<DataCoreDatabase>, Vec<u8>), String>),
+    DataCoreProgress {
+        current: usize,
+        total: usize,
+    },
     ReferenceIndexReady(Arc<ReferenceIndex>),
     StructReferenceIndexReady(Arc<StructReferenceIndex>),
-    ExtractionProgress { current: usize, total: usize, current_file: String },
+    ExtractionProgress {
+        current: usize,
+        total: usize,
+        current_file: String,
+    },
     ExtractionComplete(Result<(), String>),
     FilePreviewReady(PreviewData),
     Error(String),
+    // Comparison messages
+    P4kComparisonReady(Result<P4kComparisonState, String>),
+    DcbComparisonReady(Result<DcbComparisonState, String>),
+    DcbComparisonProgress {
+        phase: String,
+        current: usize,
+        total: usize,
+    },
+    FileDiffReady { path: String, diff: TextDiff },
+    ItemDiffReady { item_type: DcbItemType, name: String, diff: TextDiff },
 }
 
 /// Preview data for different file types
@@ -31,6 +55,33 @@ pub enum PreviewData {
     Hex { data: Vec<u8>, offset: usize },
     Image(Vec<u8>), // PNG bytes
     None,
+}
+
+/// P4K comparison state
+#[derive(Debug, Clone)]
+pub struct P4kComparisonState {
+    pub old_archive: Arc<P4kArchive>,
+    pub new_archive: Arc<P4kArchive>,
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub result: P4kComparisonResult,
+    pub selected_path: Option<String>,
+    pub current_diff: Option<TextDiff>,
+    pub diff_loading: bool,
+}
+
+/// DCB comparison state
+#[derive(Debug, Clone)]
+pub struct DcbComparisonState {
+    pub old_db: Arc<DataCoreDatabase>,
+    pub new_db: Arc<DataCoreDatabase>,
+    pub old_path: PathBuf,
+    pub new_path: PathBuf,
+    pub result: DcbComparisonResult,
+    pub selected_item: Option<(DcbItemType, String)>,
+    pub current_diff: Option<TextDiff>,
+    pub diff_loading: bool,
+    pub scope: DcbCompareScope,
 }
 
 /// Represents a node in the P4K file tree
@@ -62,7 +113,14 @@ impl FileTreeNode {
         }
     }
 
-    pub fn new_file(name: String, path: String, size: u64, compressed_size: u64, is_encrypted: bool, entry_index: usize) -> Self {
+    pub fn new_file(
+        name: String,
+        path: String,
+        size: u64,
+        compressed_size: u64,
+        is_encrypted: bool,
+        entry_index: usize,
+    ) -> Self {
         Self {
             name,
             path,
@@ -78,13 +136,12 @@ impl FileTreeNode {
 
     /// Sort children: directories first, then alphabetically
     pub fn sort_children(&mut self) {
-        self.children.sort_by(|a, b| {
-            match (a.is_directory, b.is_directory) {
+        self.children
+            .sort_by(|a, b| match (a.is_directory, b.is_directory) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            }
-        });
+            });
         for child in &mut self.children {
             child.sort_children();
         }
@@ -118,7 +175,13 @@ impl DataCoreRecordNode {
         }
     }
 
-    pub fn new_record(name: String, type_name: String, id: String, record_index: usize, has_references: bool) -> Self {
+    pub fn new_record(
+        name: String,
+        type_name: String,
+        id: String,
+        record_index: usize,
+        has_references: bool,
+    ) -> Self {
         Self {
             name,
             type_name,
@@ -132,13 +195,12 @@ impl DataCoreRecordNode {
     }
 
     pub fn sort_children(&mut self) {
-        self.children.sort_by(|a, b| {
-            match (a.is_folder, b.is_folder) {
+        self.children
+            .sort_by(|a, b| match (a.is_folder, b.is_folder) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            }
-        });
+            });
         for child in &mut self.children {
             child.sort_children();
         }
@@ -165,7 +227,8 @@ impl DataCoreTypeNode {
     }
 
     pub fn sort_children(&mut self) {
-        self.children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.children
+            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for child in &mut self.children {
             child.sort_children();
         }
@@ -323,6 +386,7 @@ pub struct AppState {
 
     // DataCore state
     pub datacore: Option<Arc<DataCoreDatabase>>,
+    pub datacore_data: Option<Vec<u8>>, // Raw DCB bytes for comparison
     pub datacore_loading: bool,
     pub datacore_progress: (usize, usize),
     pub datacore_tree: Option<DataCoreRecordNode>,
@@ -363,6 +427,17 @@ pub struct AppState {
     // Communication channels
     pub worker_sender: Sender<WorkerMessage>,
     pub worker_receiver: Receiver<WorkerMessage>,
+
+    // P4K comparison state
+    pub p4k_comparison: Option<P4kComparisonState>,
+    pub p4k_comparing: bool,
+    pub p4k_comparison_filter: String,
+
+    // DataCore comparison state
+    pub dcb_comparison: Option<DcbComparisonState>,
+    pub dcb_comparing: bool,
+    pub dcb_comparison_filter: String,
+    pub dcb_comparison_progress: (String, usize, usize), // phase, current, total
 }
 
 impl AppState {
@@ -380,6 +455,7 @@ impl AppState {
             preview: PreviewData::None,
             preview_loading: false,
             datacore: None,
+            datacore_data: None,
             datacore_loading: false,
             datacore_progress: (0, 0),
             datacore_tree: None,
@@ -414,12 +490,20 @@ impl AppState {
             error_dismiss_time: None,
             worker_sender: sender,
             worker_receiver: receiver,
+            p4k_comparison: None,
+            p4k_comparing: false,
+            p4k_comparison_filter: String::new(),
+            dcb_comparison: None,
+            dcb_comparing: false,
+            dcb_comparison_filter: String::new(),
+            dcb_comparison_progress: (String::new(), 0, 0),
         }
     }
 
     pub fn show_error(&mut self, msg: impl Into<String>) {
         self.error_message = Some(msg.into());
-        self.error_dismiss_time = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        self.error_dismiss_time =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     }
 
     pub fn clear_error(&mut self) {
@@ -436,19 +520,24 @@ impl AppState {
                     match result {
                         Ok(archive) => {
                             self.p4k_archive = Some(archive);
-                        self.build_file_tree();
+                            self.build_file_tree();
                         }
                         Err(e) => self.show_error(format!("Failed to load P4K: {}", e)),
                     }
                 }
-                WorkerMessage::P4kProgress { current, total, stage } => {
+                WorkerMessage::P4kProgress {
+                    current,
+                    total,
+                    stage,
+                } => {
                     self.p4k_load_progress = (current, total, stage);
                 }
                 WorkerMessage::DataCoreLoaded(result) => {
                     self.datacore_loading = false;
                     match result {
-                        Ok(db) => {
+                        Ok((db, data)) => {
                             self.datacore = Some(db.clone());
+                            self.datacore_data = Some(data);
                             self.selected_record = None;
                             self.selected_type = None;
                             self.selected_enum = None;
@@ -473,7 +562,11 @@ impl AppState {
                 WorkerMessage::DataCoreProgress { current, total } => {
                     self.datacore_progress = (current, total);
                 }
-                WorkerMessage::ExtractionProgress { current, total, current_file } => {
+                WorkerMessage::ExtractionProgress {
+                    current,
+                    total,
+                    current_file,
+                } => {
                     self.extraction_progress = (current, total, current_file);
                 }
                 WorkerMessage::ExtractionComplete(result) => {
@@ -489,6 +582,44 @@ impl AppState {
                 WorkerMessage::Error(e) => {
                     self.show_error(e);
                 }
+                WorkerMessage::P4kComparisonReady(result) => {
+                    self.p4k_comparing = false;
+                    match result {
+                        Ok(state) => {
+                            self.p4k_comparison = Some(state);
+                        }
+                        Err(e) => self.show_error(format!("Failed to compare P4K archives: {}", e)),
+                    }
+                }
+                WorkerMessage::DcbComparisonReady(result) => {
+                    self.dcb_comparing = false;
+                    self.dcb_comparison_progress = (String::new(), 0, 0);
+                    match result {
+                        Ok(state) => {
+                            self.dcb_comparison = Some(state);
+                        }
+                        Err(e) => self.show_error(format!("Failed to compare DCB files: {}", e)),
+                    }
+                }
+                WorkerMessage::DcbComparisonProgress { phase, current, total } => {
+                    self.dcb_comparison_progress = (phase, current, total);
+                }
+                WorkerMessage::FileDiffReady { path, diff } => {
+                    if let Some(ref mut comp) = self.p4k_comparison {
+                        if comp.selected_path.as_ref() == Some(&path) {
+                            comp.current_diff = Some(diff);
+                            comp.diff_loading = false;
+                        }
+                    }
+                }
+                WorkerMessage::ItemDiffReady { item_type, name, diff } => {
+                    if let Some(ref mut comp) = self.dcb_comparison {
+                        if comp.selected_item.as_ref() == Some(&(item_type, name.clone())) {
+                            comp.current_diff = Some(diff);
+                            comp.diff_loading = false;
+                        }
+                    }
+                }
             }
         }
 
@@ -502,7 +633,9 @@ impl AppState {
 
     /// Build file tree from P4K archive
     fn build_file_tree(&mut self) {
-        let Some(archive) = &self.p4k_archive else { return };
+        let Some(archive) = &self.p4k_archive else {
+            return;
+        };
 
         let mut root = FileTreeNode::new_directory("root".to_string(), String::new());
 
@@ -533,7 +666,9 @@ impl AppState {
                     ));
                 } else {
                     // Directory node
-                    let pos = current_children.iter().position(|c| c.name == *part && c.is_directory);
+                    let pos = current_children
+                        .iter()
+                        .position(|c| c.name == *part && c.is_directory);
                     if let Some(pos) = pos {
                         current_children = &mut current_children[pos].children;
                     } else {
@@ -554,7 +689,7 @@ impl AppState {
 
     /// Build DataCore record tree
     fn build_datacore_tree(&mut self) {
-        use svarog::datacore::{Value, ArrayElementType};
+        use svarog::datacore::{ArrayElementType, Value};
 
         let Some(db) = &self.datacore else { return };
 
@@ -567,19 +702,19 @@ impl AppState {
 
             // Check if record has any references
             let instance = db.instance(record.struct_index as u32, record.instance_index as u32);
-            let has_refs = instance.properties().any(|prop| {
-                match &prop.value {
-                    Value::Reference(Some(_)) => true,
-                    Value::StrongPointer(Some(_)) => true,
-                    Value::WeakPointer(Some(_)) => true,
-                    Value::Array(arr) => {
-                        matches!(
-                            arr.element_type,
-                            ArrayElementType::Reference | ArrayElementType::StrongPointer | ArrayElementType::WeakPointer
-                        ) && arr.count > 0
-                    }
-                    _ => false,
+            let has_refs = instance.properties().any(|prop| match &prop.value {
+                Value::Reference(Some(_)) => true,
+                Value::StrongPointer(Some(_)) => true,
+                Value::WeakPointer(Some(_)) => true,
+                Value::Array(arr) => {
+                    matches!(
+                        arr.element_type,
+                        ArrayElementType::Reference
+                            | ArrayElementType::StrongPointer
+                            | ArrayElementType::WeakPointer
+                    ) && arr.count > 0
                 }
+                _ => false,
             });
 
             let mut current_children = &mut root.children;
@@ -590,7 +725,10 @@ impl AppState {
                 if is_last {
                     // Record node
                     let name = db.record_name(record).unwrap_or("Unknown").to_string();
-                    let type_name = db.struct_name(record.struct_index as usize).unwrap_or("Unknown").to_string();
+                    let type_name = db
+                        .struct_name(record.struct_index as usize)
+                        .unwrap_or("Unknown")
+                        .to_string();
                     current_children.push(DataCoreRecordNode::new_record(
                         name,
                         type_name,
@@ -600,7 +738,9 @@ impl AppState {
                     ));
                 } else {
                     // Folder node
-                    let pos = current_children.iter().position(|c| c.name == *part && c.is_folder);
+                    let pos = current_children
+                        .iter()
+                        .position(|c| c.name == *part && c.is_folder);
                     if let Some(pos) = pos {
                         current_children = &mut current_children[pos].children;
                     } else {
@@ -676,7 +816,7 @@ impl AppState {
     /// Note: This is deprecated in favor of the worker-based build_reference_index
     #[allow(dead_code)]
     fn build_reference_index(&mut self) {
-        use svarog::datacore::{Value, ArrayElementType};
+        use svarog::datacore::{ArrayElementType, Value};
 
         let Some(db) = &self.datacore else { return };
 
@@ -696,7 +836,10 @@ impl AppState {
         let mut instance_to_index: std::collections::HashMap<(u32, u32), usize> =
             std::collections::HashMap::new();
         for (idx, record) in main_records.iter().enumerate() {
-            instance_to_index.insert((record.struct_index as u32, record.instance_index as u32), idx);
+            instance_to_index.insert(
+                (record.struct_index as u32, record.instance_index as u32),
+                idx,
+            );
         }
 
         for (source_idx, record) in main_records.iter().enumerate() {
@@ -707,28 +850,31 @@ impl AppState {
                     Value::Reference(Some(record_ref)) => {
                         let guid_str = format!("{}", record_ref.guid);
                         if let Some(&target_idx) = guid_to_index.get(&guid_str) {
-                            incoming
-                                .entry(target_idx)
-                                .or_default()
-                                .push((source_idx, prop.name.to_string(), ReferenceType::Reference));
+                            incoming.entry(target_idx).or_default().push((
+                                source_idx,
+                                prop.name.to_string(),
+                                ReferenceType::Reference,
+                            ));
                         }
                     }
                     Value::StrongPointer(Some(instance_ref)) => {
                         let key = (instance_ref.struct_index, instance_ref.instance_index);
                         if let Some(&target_idx) = instance_to_index.get(&key) {
-                            incoming
-                                .entry(target_idx)
-                                .or_default()
-                                .push((source_idx, prop.name.to_string(), ReferenceType::StrongPointer));
+                            incoming.entry(target_idx).or_default().push((
+                                source_idx,
+                                prop.name.to_string(),
+                                ReferenceType::StrongPointer,
+                            ));
                         }
                     }
                     Value::WeakPointer(Some(instance_ref)) => {
                         let key = (instance_ref.struct_index, instance_ref.instance_index);
                         if let Some(&target_idx) = instance_to_index.get(&key) {
-                            incoming
-                                .entry(target_idx)
-                                .or_default()
-                                .push((source_idx, prop.name.to_string(), ReferenceType::WeakPointer));
+                            incoming.entry(target_idx).or_default().push((
+                                source_idx,
+                                prop.name.to_string(),
+                                ReferenceType::WeakPointer,
+                            ));
                         }
                     }
                     Value::Array(array_ref) => {
@@ -739,17 +885,21 @@ impl AppState {
                                         let idx = array_ref.first_index as usize + i as usize;
                                         if let Some(ref_val) = db.reference_value(idx) {
                                             let guid_str = format!("{}", ref_val.record_id);
-                                            if let Some(&target_idx) = guid_to_index.get(&guid_str) {
-                                                incoming
-                                                    .entry(target_idx)
-                                                    .or_default()
-                                                    .push((source_idx, format!("{}[{}]", prop.name, i), ReferenceType::Reference));
+                                            if let Some(&target_idx) = guid_to_index.get(&guid_str)
+                                            {
+                                                incoming.entry(target_idx).or_default().push((
+                                                    source_idx,
+                                                    format!("{}[{}]", prop.name, i),
+                                                    ReferenceType::Reference,
+                                                ));
                                             }
                                         }
                                     }
                                 }
                                 ArrayElementType::StrongPointer | ArrayElementType::WeakPointer => {
-                                    let ref_type = if array_ref.element_type == ArrayElementType::StrongPointer {
+                                    let ref_type = if array_ref.element_type
+                                        == ArrayElementType::StrongPointer
+                                    {
                                         ReferenceType::StrongPointer
                                     } else {
                                         ReferenceType::WeakPointer
@@ -764,12 +914,16 @@ impl AppState {
                                         };
 
                                         if let Some(ptr) = ptr {
-                                            let key = (ptr.struct_index as u32, ptr.instance_index as u32);
+                                            let key = (
+                                                ptr.struct_index as u32,
+                                                ptr.instance_index as u32,
+                                            );
                                             if let Some(&target_idx) = instance_to_index.get(&key) {
-                                                incoming
-                                                    .entry(target_idx)
-                                                    .or_default()
-                                                    .push((source_idx, format!("{}[{}]", prop.name, i), ref_type));
+                                                incoming.entry(target_idx).or_default().push((
+                                                    source_idx,
+                                                    format!("{}[{}]", prop.name, i),
+                                                    ref_type,
+                                                ));
                                             }
                                         }
                                     }
@@ -783,6 +937,9 @@ impl AppState {
             }
         }
 
-        self.reference_index = Some(std::sync::Arc::new(ReferenceIndex { incoming, guid_to_index }));
+        self.reference_index = Some(std::sync::Arc::new(ReferenceIndex {
+            incoming,
+            guid_to_index,
+        }));
     }
 }

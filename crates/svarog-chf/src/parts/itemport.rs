@@ -206,9 +206,7 @@ impl ItemPort {
 
     /// Iterate over all ports in the tree (pre-order traversal).
     pub fn iter(&self) -> ItemPortIter<'_> {
-        ItemPortIter {
-            stack: vec![self],
-        }
+        ItemPortIter { stack: vec![self] }
     }
 }
 

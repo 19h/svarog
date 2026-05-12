@@ -38,6 +38,7 @@
 //! ```
 
 mod archive;
+pub mod compare;
 mod crypto;
 mod decompress;
 mod entry;
@@ -46,5 +47,7 @@ mod simd;
 pub mod zip;
 
 pub use archive::{P4kArchive, P4kEntryRef};
+pub use compare::{compare_archives, is_cryxml_extension, is_text_file};
+pub use compare::{FileComparisonResult, P4kComparisonResult};
 pub use entry::P4kEntry;
 pub use error::{Error, Result};

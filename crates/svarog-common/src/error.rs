@@ -11,10 +11,7 @@ pub enum Error {
 
     /// Invalid magic bytes encountered.
     #[error("invalid magic: expected {expected:?}, got {actual:?}")]
-    InvalidMagic {
-        expected: Vec<u8>,
-        actual: Vec<u8>,
-    },
+    InvalidMagic { expected: Vec<u8>, actual: Vec<u8> },
 
     /// Value did not match expected.
     #[error("expected value {expected}, got {actual}")]

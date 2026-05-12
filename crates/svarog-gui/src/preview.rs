@@ -42,7 +42,7 @@ fn render_text_preview(ui: &mut Ui, text: &str) {
                 TextEdit::multiline(&mut text_edit)
                     .font(TextStyle::Monospace)
                     .desired_width(f32::INFINITY)
-                    .interactive(false)
+                    .interactive(false),
             );
         });
 }
@@ -75,7 +75,9 @@ fn render_hex_preview(ui: &mut Ui, data: &[u8], _offset: usize) {
 
                 ui.horizontal(|ui| {
                     // Offset column
-                    ui.label(RichText::new(format!("{:08X}  ", line_start)).color(Color32::LIGHT_BLUE));
+                    ui.label(
+                        RichText::new(format!("{:08X}  ", line_start)).color(Color32::LIGHT_BLUE),
+                    );
 
                     // Hex bytes
                     for byte in line_data {
@@ -98,17 +100,26 @@ fn render_hex_preview(ui: &mut Ui, data: &[u8], _offset: usize) {
                     ui.label(" ");
                     let ascii: String = line_data
                         .iter()
-                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                        .map(|&b| {
+                            if b.is_ascii_graphic() || b == b' ' {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
                         .collect();
                     ui.label(RichText::new(ascii).color(Color32::LIGHT_GRAY));
                 });
             }
 
             if data.len() > display_bytes {
-                ui.label(RichText::new(format!(
-                    "\n... and {} more bytes",
-                    data.len() - display_bytes
-                )).color(Color32::YELLOW));
+                ui.label(
+                    RichText::new(format!(
+                        "\n... and {} more bytes",
+                        data.len() - display_bytes
+                    ))
+                    .color(Color32::YELLOW),
+                );
             }
         });
 }
@@ -132,10 +143,7 @@ fn render_image_preview(ui: &mut Ui, data: &[u8]) {
                 .show(ui, |ui| {
                     ui.image(&texture);
 
-                    ui.label(format!(
-                        "{}x{} pixels",
-                        size[0], size[1]
-                    ));
+                    ui.label(format!("{}x{} pixels", size[0], size[1]));
                 });
         }
         Err(e) => {

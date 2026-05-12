@@ -2,8 +2,8 @@
 //!
 //! P4K archives use AES-128-CBC encryption with a hardcoded key and zero IV.
 
-use aes::cipher::{BlockDecryptMut, KeyIvInit};
 use aes::cipher::generic_array::GenericArray;
+use aes::cipher::{BlockDecryptMut, KeyIvInit};
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
@@ -50,7 +50,11 @@ pub fn decrypt_in_place(data: &mut [u8]) -> Result<usize, &'static str> {
         .map_err(|_| "decryption failed")?;
 
     // Find the last non-null byte (trim zero padding)
-    let last_non_null = data.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+    let last_non_null = data
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
     Ok(last_non_null)
 }

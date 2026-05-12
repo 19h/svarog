@@ -39,10 +39,7 @@ impl<'a> XmlExporter<'a> {
         writer: W,
     ) -> Result<(), ExportError> {
         let pointers = RecordWalker::walk(self.database, record);
-        let file_path = self
-            .database
-            .record_file_name(record)
-            .unwrap_or("unknown");
+        let file_path = self.database.record_file_name(record).unwrap_or("unknown");
 
         let mut context = ExportContext {
             database: self.database,
@@ -58,10 +55,7 @@ impl<'a> XmlExporter<'a> {
             .map_err(|e| ExportError::Xml(e.to_string()))?;
 
         // Get record name
-        let record_name = self
-            .database
-            .record_name(record)
-            .unwrap_or("Record");
+        let record_name = self.database.record_name(record).unwrap_or("Record");
 
         // Encode the name for XML (replace invalid chars)
         let encoded_name = encode_xml_name(record_name);
@@ -108,7 +102,8 @@ impl<'a> XmlExporter<'a> {
                 .unwrap_or("unknown.xml");
 
             // Convert path separators and add .xml extension
-            let output_path = output_dir.join(file_name.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let output_path =
+                output_dir.join(file_name.replace('/', std::path::MAIN_SEPARATOR_STR));
             let output_path = output_path.with_extension("xml");
 
             // Create parent directories
@@ -135,7 +130,11 @@ struct ExportContext<'a, W: Write> {
 }
 
 impl<'a, W: Write> ExportContext<'a, W> {
-    fn write_instance(&mut self, struct_index: i32, instance_index: usize) -> Result<(), ExportError> {
+    fn write_instance(
+        &mut self,
+        struct_index: i32,
+        instance_index: usize,
+    ) -> Result<(), ExportError> {
         let mut reader = self
             .database
             .get_instance_reader(struct_index as usize, instance_index);
@@ -148,7 +147,11 @@ impl<'a, W: Write> ExportContext<'a, W> {
         self.write_struct(struct_index, &mut reader)
     }
 
-    fn write_struct(&mut self, struct_index: i32, reader: &mut BinaryReader<'_>) -> Result<(), ExportError> {
+    fn write_struct(
+        &mut self,
+        struct_index: i32,
+        reader: &mut BinaryReader<'_>,
+    ) -> Result<(), ExportError> {
         // Write type attribute
         if let Some(type_name) = self.database.struct_name(struct_index as usize) {
             self.write_attribute_str("Type", type_name)?;
@@ -157,10 +160,7 @@ impl<'a, W: Write> ExportContext<'a, W> {
         let properties = self.database.get_struct_properties(struct_index as usize);
 
         for prop in properties {
-            let prop_name = self
-                .database
-                .property_name(prop)
-                .unwrap_or("Unknown");
+            let prop_name = self.database.property_name(prop).unwrap_or("Unknown");
 
             let data_type = match DataType::from_u16(prop.data_type) {
                 Some(dt) => dt,
@@ -205,7 +205,10 @@ impl<'a, W: Write> ExportContext<'a, W> {
 
                 self.start_element(&encoded_name)?;
                 if !pointer.is_null() {
-                    if let Some(&ptr_id) = self.pointers.get(&(pointer.struct_index, pointer.instance_index)) {
+                    if let Some(&ptr_id) = self
+                        .pointers
+                        .get(&(pointer.struct_index, pointer.instance_index))
+                    {
                         self.write_attribute_str("PointsTo", &format!("ptr:{}", ptr_id))?;
                     }
                 }
@@ -244,8 +247,12 @@ impl<'a, W: Write> ExportContext<'a, W> {
         struct_index: i32,
         reader: &mut BinaryReader<'_>,
     ) -> Result<(), ExportError> {
-        let count = reader.read_i32().map_err(|e| ExportError::Read(e.to_string()))?;
-        let first_index = reader.read_i32().map_err(|e| ExportError::Read(e.to_string()))?;
+        let count = reader
+            .read_i32()
+            .map_err(|e| ExportError::Read(e.to_string()))?;
+        let first_index = reader
+            .read_i32()
+            .map_err(|e| ExportError::Read(e.to_string()))?;
 
         let encoded_name = encode_xml_name(name);
 
@@ -309,7 +316,10 @@ impl<'a, W: Write> ExportContext<'a, W> {
                     let encoded = encode_xml_name(type_name);
                     self.start_element(&encoded)?;
                     if !pointer.is_null() {
-                        if let Some(&ptr_id) = self.pointers.get(&(pointer.struct_index, pointer.instance_index)) {
+                        if let Some(&ptr_id) = self
+                            .pointers
+                            .get(&(pointer.struct_index, pointer.instance_index))
+                        {
                             self.write_attribute_str("PointsTo", &format!("ptr:{}", ptr_id))?;
                         }
                     }
