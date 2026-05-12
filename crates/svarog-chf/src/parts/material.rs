@@ -307,6 +307,9 @@ pub struct Material {
 }
 
 impl Material {
+    /// Minimum binary projection size before variable material data.
+    pub const MIN_BINARY_SIZE: usize = 4 + 16 + 4 + 4;
+
     /// Create a new empty material.
     pub fn new(name: NameHash, guid: CigGuid) -> Self {
         Self {

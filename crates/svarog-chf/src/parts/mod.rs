@@ -7,10 +7,12 @@
 //!
 //! A CHF file's decompressed data contains:
 //! - [`ChfData`]: The main container
-//!   - Gender GUID (16 bytes identifying male/female base)
+//!   - Versioned `CharacterCustomization` serializer data
+//!   - `modelTag` and `voiceTag`
 //!   - [`Dna`]: Facial feature morphs (48 blend targets across 12 face parts)
-//!   - [`ItemPort`]: Equipment attachment tree (hierarchical ports with GUIDs)
+//!   - [`ItemPort`]: `Loadout` entries with port IDs, item GUIDs, and child counts
 //!   - [`Material`]: Appearance customization (textures and shader parameters)
+//!   - Decal entries for newer CHF versions
 //!
 //! # Name Hashing
 //!
@@ -24,7 +26,9 @@ mod itemport;
 mod material;
 mod name_hash;
 
-pub use data::ChfData;
+pub use data::{
+    is_supported_version, ChfData, Decal, CHF_CURRENT_VERSION, CHF_MAX_VERSION, CHF_MIN_VERSION,
+};
 pub use dna::{Dna, DnaPart, FacePart, BLENDS_PER_FACE_PART, DNA_PART_COUNT, DNA_SIZE};
 pub use itemport::{ItemPort, ItemPortIter};
 pub use material::{ColorRgba, Material, MaterialParam, SubMaterial, Texture};

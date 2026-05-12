@@ -139,3 +139,17 @@ pub fn mipmap_size(width: u32, height: u32, block_size: usize) -> usize {
     let blocks_y = ((height as usize) + 3) / 4;
     blocks_x.max(1) * blocks_y.max(1) * block_size
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_layout_matches_dds_headers() {
+        assert_eq!(DdsHeader::SIZE, 124);
+        assert_eq!(std::mem::size_of::<DdsHeader>(), 124);
+        assert_eq!(std::mem::size_of::<DdsPixelFormat>(), 32);
+        assert_eq!(std::mem::size_of::<FourCC>(), 4);
+        assert_eq!(std::mem::size_of::<DdsHeaderDxt10>(), 20);
+    }
+}

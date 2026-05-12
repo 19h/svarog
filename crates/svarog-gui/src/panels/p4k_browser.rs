@@ -325,14 +325,7 @@ impl P4kBrowserPanel {
                                 .strong(),
                         );
                         for (path, status, size) in &added {
-                            render_comparison_item(
-                                ui,
-                                path,
-                                status,
-                                *size,
-                                state,
-                                &mut row_index,
-                            );
+                            render_comparison_item(ui, path, status, *size, state, &mut row_index);
                         }
                         ui.add_space(8.0);
                     }
@@ -345,14 +338,7 @@ impl P4kBrowserPanel {
                                 .strong(),
                         );
                         for (path, status, size) in &removed {
-                            render_comparison_item(
-                                ui,
-                                path,
-                                status,
-                                *size,
-                                state,
-                                &mut row_index,
-                            );
+                            render_comparison_item(ui, path, status, *size, state, &mut row_index);
                         }
                         ui.add_space(8.0);
                     }
@@ -365,14 +351,7 @@ impl P4kBrowserPanel {
                                 .strong(),
                         );
                         for (path, status, size) in &modified {
-                            render_comparison_item(
-                                ui,
-                                path,
-                                status,
-                                *size,
-                                state,
-                                &mut row_index,
-                            );
+                            render_comparison_item(ui, path, status, *size, state, &mut row_index);
                         }
                     }
                 });
@@ -459,7 +438,8 @@ fn render_comparison_item(
                     color
                 };
 
-                let response = ui.selectable_label(is_selected, RichText::new(filename).color(name_color));
+                let response =
+                    ui.selectable_label(is_selected, RichText::new(filename).color(name_color));
 
                 if response.clicked() {
                     let path_owned = path.to_string();

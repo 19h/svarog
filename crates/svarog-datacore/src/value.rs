@@ -247,9 +247,9 @@ impl<'a> Value<'a> {
     #[inline]
     pub fn as_instance(&self) -> Option<InstanceRef> {
         match self {
-            Value::ClassRef(r)
-            | Value::StrongPointer(Some(r))
-            | Value::WeakPointer(Some(r)) => Some(*r),
+            Value::ClassRef(r) | Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => {
+                Some(*r)
+            }
             _ => None,
         }
     }
@@ -259,9 +259,9 @@ impl<'a> Value<'a> {
     pub fn struct_index(&self) -> Option<u32> {
         match self {
             Value::Class { struct_index, .. } => Some(*struct_index),
-            Value::ClassRef(r)
-            | Value::StrongPointer(Some(r))
-            | Value::WeakPointer(Some(r)) => Some(r.struct_index),
+            Value::ClassRef(r) | Value::StrongPointer(Some(r)) | Value::WeakPointer(Some(r)) => {
+                Some(r.struct_index)
+            }
             _ => None,
         }
     }

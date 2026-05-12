@@ -6,9 +6,7 @@ use crossbeam_channel::{Receiver, Sender};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use svarog::datacore::{
-    DataCoreDatabase, DcbCompareScope, DcbComparisonResult, DcbItemType,
-};
+use svarog::datacore::{DataCoreDatabase, DcbCompareScope, DcbComparisonResult, DcbItemType};
 use svarog::p4k::{P4kArchive, P4kComparisonResult};
 use svarog_common::TextDiff;
 
@@ -44,8 +42,15 @@ pub enum WorkerMessage {
         current: usize,
         total: usize,
     },
-    FileDiffReady { path: String, diff: TextDiff },
-    ItemDiffReady { item_type: DcbItemType, name: String, diff: TextDiff },
+    FileDiffReady {
+        path: String,
+        diff: TextDiff,
+    },
+    ItemDiffReady {
+        item_type: DcbItemType,
+        name: String,
+        diff: TextDiff,
+    },
 }
 
 /// Preview data for different file types
@@ -601,7 +606,11 @@ impl AppState {
                         Err(e) => self.show_error(format!("Failed to compare DCB files: {}", e)),
                     }
                 }
-                WorkerMessage::DcbComparisonProgress { phase, current, total } => {
+                WorkerMessage::DcbComparisonProgress {
+                    phase,
+                    current,
+                    total,
+                } => {
                     self.dcb_comparison_progress = (phase, current, total);
                 }
                 WorkerMessage::FileDiffReady { path, diff } => {
@@ -612,7 +621,11 @@ impl AppState {
                         }
                     }
                 }
-                WorkerMessage::ItemDiffReady { item_type, name, diff } => {
+                WorkerMessage::ItemDiffReady {
+                    item_type,
+                    name,
+                    diff,
+                } => {
                     if let Some(ref mut comp) = self.dcb_comparison {
                         if comp.selected_item.as_ref() == Some(&(item_type, name.clone())) {
                             comp.current_diff = Some(diff);

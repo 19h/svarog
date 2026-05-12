@@ -1,7 +1,8 @@
 //! CHF (Character Head File) parser for Star Citizen.
 //!
-//! CHF files store character customization data including DNA (facial features),
-//! materials, and equipped items. This crate can read, modify, and write CHF files.
+//! CHF files store character customization data including model and voice tags,
+//! DNA (facial features), materials, decals, and equipped items. This crate can
+//! read, modify, and write CHF files.
 //!
 //! # File Format
 //!
@@ -16,11 +17,9 @@
 //!
 //! # Data Structure
 //!
-//! The decompressed data contains:
-//! - Gender GUID (16 bytes)
-//! - DNA data (216 bytes of facial morphs)
-//! - Item port tree (hierarchical equipment attachments)
-//! - Materials (appearance customization)
+//! The decompressed data is read by the game as a `CharacterCustomization`
+//! serializer tree containing `version`, `modelTag`, `voiceTag`, `dnaByteArray`,
+//! `Loadout`, `Materials`, and version 8+ `Decals`.
 //!
 //! # Example
 //!
@@ -33,7 +32,7 @@
 //!
 //! // Parse the internal data
 //! let data = ChfData::parse(chf.data())?;
-//! println!("Gender: {}", data.gender_id());
+//! println!("Model tag: {}", data.model_tag());
 //!
 //! // Access DNA (facial features)
 //! for (face_part, blends) in data.dna().iter_face_parts() {
@@ -53,4 +52,4 @@ pub use error::{Error, Result};
 pub use file::ChfFile;
 
 // Re-export commonly used types at crate root
-pub use parts::{ChfData, Dna, FacePart, ItemPort, Material, NameHash};
+pub use parts::{ChfData, Decal, Dna, FacePart, ItemPort, Material, NameHash};

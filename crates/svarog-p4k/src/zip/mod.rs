@@ -35,3 +35,18 @@ impl TryFrom<u16> for CompressionMethod {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_layout_matches_zip_and_p4k_reader() {
+        assert_eq!(std::mem::size_of::<LocalFileHeader>(), 26);
+        assert_eq!(std::mem::size_of::<CentralDirectoryHeader>(), 42);
+        assert_eq!(std::mem::size_of::<EocdRecord>(), 18);
+        assert_eq!(std::mem::size_of::<Eocd64Locator>(), 16);
+        assert_eq!(std::mem::size_of::<Eocd64Record>(), 52);
+        assert_eq!(std::mem::size_of::<CompressionMethod>(), 2);
+    }
+}

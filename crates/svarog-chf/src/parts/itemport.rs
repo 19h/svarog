@@ -1,8 +1,9 @@
 //! ItemPort data structures.
 //!
-//! ItemPorts represent a hierarchical tree of attachment points for character
-//! equipment. Each item port has a name (stored as CRC32C hash), an optional
-//! GUID for the attached item, and zero or more child ports.
+//! ItemPorts represent the `Loadout` serializer entries from character
+//! customization data. Each entry stores `portID`, `itemGUID`, and `childCount`;
+//! the child count can be used to reconstruct the hierarchy from the flat
+//! pre-order list emitted by the game.
 
 use svarog_common::{BinaryReader, CigGuid};
 
@@ -11,16 +12,15 @@ use crate::Result;
 
 /// An item port in the character's equipment tree.
 ///
-/// Item ports form a recursive tree structure where each port can have
-/// child ports. This is used for equipment attachment (e.g., a torso
-/// armor port might have child ports for arm attachments).
+/// The game serializes these as `ItemPort` children under `Loadout`, with
+/// `portID`, `itemGUID`, and `childCount` fields.
 #[derive(Debug, Clone)]
 pub struct ItemPort {
-    /// The name hash of this port.
+    /// The `portID`/item port definition id.
     name: NameHash,
-    /// The GUID of the item attached to this port, if any.
+    /// The `itemGUID` of the item attached to this port, if any.
     item_guid: Option<CigGuid>,
-    /// Child item ports.
+    /// Child item ports reconstructed from `childCount`.
     children: Vec<ItemPort>,
 }
 
@@ -64,11 +64,9 @@ impl ItemPort {
 
     /// Read an item port from a binary reader.
     fn read(reader: &mut BinaryReader<'_>) -> Result<Self> {
-        // Read name hash (4 bytes)
         let name_hash = reader.read_u32()?;
         let name = NameHash::from_raw(name_hash);
 
-        // Read GUID (16 bytes) - all zeros means no item attached
         let guid_bytes = reader.read_bytes(16)?;
         let item_guid = {
             let guid = CigGuid::from_bytes(guid_bytes.try_into().unwrap());
@@ -79,10 +77,8 @@ impl ItemPort {
             }
         };
 
-        // Read child count (4 bytes)
         let child_count = reader.read_u32()? as usize;
 
-        // Read children recursively
         let mut children = Vec::with_capacity(child_count);
         for _ in 0..child_count {
             children.push(Self::read(reader)?);
@@ -100,6 +96,11 @@ impl ItemPort {
         self.name
     }
 
+    /// Get the decompiled `portID` field.
+    pub fn port_id(&self) -> u32 {
+        self.name.value()
+    }
+
     /// Get the name of this port (if known).
     pub fn name_str(&self) -> Option<&'static str> {
         self.name.to_name()
@@ -107,6 +108,11 @@ impl ItemPort {
 
     /// Get the GUID of the attached item, if any.
     pub fn item_guid(&self) -> Option<&CigGuid> {
+        self.item_guid.as_ref()
+    }
+
+    /// Get the decompiled `itemGUID` field.
+    pub fn item_class_guid(&self) -> Option<&CigGuid> {
         self.item_guid.as_ref()
     }
 
@@ -118,6 +124,11 @@ impl ItemPort {
     /// Get the child ports.
     pub fn children(&self) -> &[ItemPort] {
         &self.children
+    }
+
+    /// Get the decompiled `childCount` value represented by this tree.
+    pub fn child_count(&self) -> u32 {
+        self.children.len() as u32
     }
 
     /// Get mutable access to child ports.
@@ -186,19 +197,15 @@ impl ItemPort {
 
     /// Write to a byte buffer.
     fn write_to(&self, bytes: &mut Vec<u8>) {
-        // Write name hash
         bytes.extend_from_slice(&self.name.value().to_le_bytes());
 
-        // Write GUID (or zeros if none)
         match &self.item_guid {
             Some(guid) => bytes.extend_from_slice(guid.as_bytes()),
             None => bytes.extend_from_slice(&[0u8; 16]),
         }
 
-        // Write child count
         bytes.extend_from_slice(&(self.children.len() as u32).to_le_bytes());
 
-        // Write children recursively
         for child in &self.children {
             child.write_to(bytes);
         }

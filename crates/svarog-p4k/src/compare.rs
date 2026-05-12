@@ -255,8 +255,14 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path("Data/Objects/test.xml"), "data\\objects\\test.xml");
-        assert_eq!(normalize_path("DATA\\OBJECTS\\TEST.XML"), "data\\objects\\test.xml");
+        assert_eq!(
+            normalize_path("Data/Objects/test.xml"),
+            "data\\objects\\test.xml"
+        );
+        assert_eq!(
+            normalize_path("DATA\\OBJECTS\\TEST.XML"),
+            "data\\objects\\test.xml"
+        );
     }
 
     #[test]

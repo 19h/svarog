@@ -41,7 +41,7 @@ pub use svarog_p4k as p4k;
 
 /// Prelude module for convenient imports.
 pub mod prelude {
-    pub use svarog_chf::{ChfData, ChfFile, Dna, FacePart, ItemPort, Material, NameHash};
+    pub use svarog_chf::{ChfData, ChfFile, Decal, Dna, FacePart, ItemPort, Material, NameHash};
     pub use svarog_common::{crc, BinaryReader, CigGuid};
     pub use svarog_cryxml::CryXml;
     pub use svarog_datacore::{DataCoreDatabase, XmlExporter};

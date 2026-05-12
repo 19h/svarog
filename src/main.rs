@@ -1125,8 +1125,7 @@ fn cmd_dcb_extract(input: &PathBuf, output: &PathBuf, filter: Option<&str>) -> R
     println!("Loading DataCore: {}", input.display());
 
     let start = Instant::now();
-    let data = fs::read(input).context("Failed to read input file")?;
-    let database = DataCoreDatabase::parse(&data).context("Failed to parse DataCore")?;
+    let database = DataCoreDatabase::open(input).context("Failed to parse DataCore")?;
 
     println!(
         "Loaded in {:?}: {} structs, {} enums, {} records",
@@ -1235,7 +1234,9 @@ fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
 
     // Parse and display character data
     if let Ok(data) = ChfData::parse(chf.data()) {
-        println!("Gender ID: {}", data.gender_id());
+        println!("Version: {}", data.version());
+        println!("Model tag: {}", data.model_tag());
+        println!("Voice tag: {}", data.voice_tag());
 
         // Show DNA summary
         let mut active_blends = 0;
@@ -1256,6 +1257,10 @@ fn cmd_chf_process(input: &PathBuf, output: &PathBuf) -> Result<()> {
         // Show materials
         if !data.materials().is_empty() {
             println!("Materials: {}", data.materials().len());
+        }
+
+        if !data.decals().is_empty() {
+            println!("Decals: {}", data.decals().len());
         }
     }
 
@@ -1289,8 +1294,7 @@ fn cmd_dcb_schema(input: &PathBuf, output: &PathBuf) -> Result<()> {
     println!("Loading DataCore: {}", input.display());
 
     let start = Instant::now();
-    let data = fs::read(input).context("Failed to read input file")?;
-    let db = DataCoreDatabase::parse(&data).context("Failed to parse DataCore")?;
+    let db = DataCoreDatabase::open(input).context("Failed to parse DataCore")?;
 
     println!(
         "Loaded in {:?}: {} structs, {} enums",
@@ -1387,13 +1391,14 @@ fn cmd_p4k_compare(
     let old_archive = P4kArchive::open(p4k1).context("Failed to open old P4K")?;
     let new_archive = P4kArchive::open(p4k2).context("Failed to open new P4K")?;
 
-    println!("Comparing {} vs {} files...", old_archive.entry_count(), new_archive.entry_count());
+    println!(
+        "Comparing {} vs {} files...",
+        old_archive.entry_count(),
+        new_archive.entry_count()
+    );
     let result = compare_archives(&old_archive, &new_archive);
 
-    println!(
-        "\nComparison complete in {:?}",
-        start.elapsed()
-    );
+    println!("\nComparison complete in {:?}", start.elapsed());
 
     let show_all = !added_only && !removed_only && !modified_only;
 
@@ -1454,10 +1459,9 @@ fn cmd_p4k_compare(
 
             // Show diff for text files if requested
             if show_diff && is_text_file(&item.path) {
-                if let (Some(old_entry), Some(new_entry)) = (
-                    old_archive.find(&item.path),
-                    new_archive.find(&item.path),
-                ) {
+                if let (Some(old_entry), Some(new_entry)) =
+                    (old_archive.find(&item.path), new_archive.find(&item.path))
+                {
                     if let (Ok(old_data), Ok(new_data)) =
                         (old_archive.read(&old_entry), new_archive.read(&new_entry))
                     {
@@ -1504,7 +1508,9 @@ fn load_dcb_data(path: &PathBuf) -> Result<Vec<u8>> {
         let dcb_names = ["Data/Game.dcb", "Data/Game2.dcb", "Game.dcb", "Game2.dcb"];
         for name in &dcb_names {
             if let Some(entry) = archive.find(name) {
-                let dcb_data = archive.read(&entry).context("Failed to read DCB from P4K")?;
+                let dcb_data = archive
+                    .read(&entry)
+                    .context("Failed to read DCB from P4K")?;
                 println!("  (extracted {} from P4K)", name);
                 return Ok(dcb_data);
             }
@@ -1578,10 +1584,7 @@ fn cmd_dcb_compare(
                     continue;
                 }
             }
-            println!(
-                "\x1b[32m+ [{}] {}\x1b[0m",
-                item.item_type, item.name
-            );
+            println!("\x1b[32m+ [{}] {}\x1b[0m", item.item_type, item.name);
 
             if show_diff {
                 if let Some(new_idx) = item.new_index {
@@ -1609,10 +1612,7 @@ fn cmd_dcb_compare(
                     continue;
                 }
             }
-            println!(
-                "\x1b[31m- [{}] {}\x1b[0m",
-                item.item_type, item.name
-            );
+            println!("\x1b[31m- [{}] {}\x1b[0m", item.item_type, item.name);
 
             if show_diff {
                 if let Some(old_idx) = item.old_index {
@@ -1640,10 +1640,7 @@ fn cmd_dcb_compare(
                     continue;
                 }
             }
-            println!(
-                "\x1b[33m~ [{}] {}\x1b[0m",
-                item.item_type, item.name
-            );
+            println!("\x1b[33m~ [{}] {}\x1b[0m", item.item_type, item.name);
 
             if show_diff {
                 if let (Some(old_idx), Some(new_idx)) = (item.old_index, item.new_index) {

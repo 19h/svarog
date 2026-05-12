@@ -110,7 +110,10 @@ impl DcbComparisonResult {
     }
 
     /// Get items of a specific type
-    pub fn items_of_type(&self, item_type: DcbItemType) -> impl Iterator<Item = &DcbComparisonItem> {
+    pub fn items_of_type(
+        &self,
+        item_type: DcbItemType,
+    ) -> impl Iterator<Item = &DcbComparisonItem> {
         self.added
             .iter()
             .chain(self.removed.iter())
@@ -120,9 +123,21 @@ impl DcbComparisonResult {
 
     /// Count changes by type
     pub fn count_by_type(&self, item_type: DcbItemType) -> (usize, usize, usize) {
-        let added = self.added.iter().filter(|i| i.item_type == item_type).count();
-        let removed = self.removed.iter().filter(|i| i.item_type == item_type).count();
-        let modified = self.modified.iter().filter(|i| i.item_type == item_type).count();
+        let added = self
+            .added
+            .iter()
+            .filter(|i| i.item_type == item_type)
+            .count();
+        let removed = self
+            .removed
+            .iter()
+            .filter(|i| i.item_type == item_type)
+            .count();
+        let modified = self
+            .modified
+            .iter()
+            .filter(|i| i.item_type == item_type)
+            .count();
         (added, removed, modified)
     }
 }
@@ -195,9 +210,15 @@ pub fn compare_databases_with_progress(
     }
 
     // Sort all results by name for consistent output
-    result.added.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    result.removed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    result.modified.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
+        .added
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
+        .removed
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
+        .modified
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     result
 }
@@ -266,7 +287,10 @@ fn compare_records(
         let new_xml = new_exporter.export_record(new_record).unwrap_or_default();
 
         if old_xml != new_xml {
-            let name = new_db.record_name(new_record).unwrap_or("Unknown").to_string();
+            let name = new_db
+                .record_name(new_record)
+                .unwrap_or("Unknown")
+                .to_string();
             result.modified.push(DcbComparisonItem {
                 name,
                 item_type: DcbItemType::Record,
@@ -492,7 +516,10 @@ fn compare_records_with_progress(
         let new_xml = new_exporter.export_record(new_record).unwrap_or_default();
 
         if old_xml != new_xml {
-            let name = new_db.record_name(new_record).unwrap_or("Unknown").to_string();
+            let name = new_db
+                .record_name(new_record)
+                .unwrap_or("Unknown")
+                .to_string();
             result.modified.push(DcbComparisonItem {
                 name,
                 item_type: DcbItemType::Record,
@@ -671,9 +698,9 @@ fn compare_enums_with_progress(
 /// Returns the XML export of the record, suitable for text diffing.
 pub fn get_record_content(db: &DataCoreDatabase, record_index: usize) -> Option<String> {
     let records: Vec<_> = db.main_records().collect();
-    records.get(record_index).and_then(|record| {
-        XmlExporter::new(db).export_record(record).ok()
-    })
+    records
+        .get(record_index)
+        .and_then(|record| XmlExporter::new(db).export_record(record).ok())
 }
 
 /// Generate content for diffing a struct from a database.
@@ -704,8 +731,14 @@ mod tests {
 
     #[test]
     fn test_scope_from_str() {
-        assert_eq!(DcbCompareScope::from_str("records"), DcbCompareScope::Records);
-        assert_eq!(DcbCompareScope::from_str("STRUCTS"), DcbCompareScope::Structs);
+        assert_eq!(
+            DcbCompareScope::from_str("records"),
+            DcbCompareScope::Records
+        );
+        assert_eq!(
+            DcbCompareScope::from_str("STRUCTS"),
+            DcbCompareScope::Structs
+        );
         assert_eq!(DcbCompareScope::from_str("enums"), DcbCompareScope::Enums);
         assert_eq!(DcbCompareScope::from_str("all"), DcbCompareScope::All);
         assert_eq!(DcbCompareScope::from_str("unknown"), DcbCompareScope::All);

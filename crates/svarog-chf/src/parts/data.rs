@@ -1,7 +1,7 @@
 //! CHF data container.
 //!
-//! The ChfData structure represents the decompressed contents of a CHF file,
-//! containing character gender, DNA (facial features), equipment ports, and materials.
+//! The ChfData structure represents the logical contents stored under the
+//! `CharacterCustomization` serializer node in a CHF payload.
 
 use svarog_common::{BinaryReader, CigGuid};
 
@@ -11,65 +11,101 @@ use super::material::Material;
 use super::name_hash::NameHash;
 use crate::{Error, Result};
 
+/// Current writer version used by the decompiled `SaveCustomHeadFile` path.
+pub const CHF_CURRENT_VERSION: u32 = 9;
+
+/// Lowest version accepted by the decompiled readers.
+pub const CHF_MIN_VERSION: u32 = 2;
+
+/// Highest version handled by the decompiled readers in this dump.
+pub const CHF_MAX_VERSION: u32 = 9;
+
 /// The main CHF data container.
 ///
 /// Contains all character customization data:
-/// - Gender ID (GUID identifying male/female)
-/// - DNA (facial feature morphs)
-/// - Item port tree (equipment attachment points)
-/// - Materials (appearance customizations)
+/// - `version`
+/// - `modelTag`
+/// - `voiceTag`
+/// - `dnaByteArray`
+/// - `Loadout` item port entries
+/// - `Materials` customization entries
+/// - `Decals` for versions newer than 7
 #[derive(Debug, Clone)]
 pub struct ChfData {
-    /// The gender GUID.
-    gender_id: CigGuid,
-    /// DNA facial feature data.
+    /// Serializer version.
+    version: u32,
+    /// Character model tag.
+    model_tag: CigGuid,
+    /// Character voice tag.
+    voice_tag: CigGuid,
+    /// Parsed DNA facial feature data.
     dna: Dna,
+    /// Original serialized bytes from `dnaByteArray`.
+    dna_byte_array: Vec<u8>,
     /// Root item port tree.
     item_port: Option<ItemPort>,
     /// Material definitions.
     materials: Vec<Material>,
+    /// Character decal definitions.
+    decals: Vec<Decal>,
 }
 
 impl ChfData {
     /// Create a new empty ChfData.
-    pub fn new(gender_id: CigGuid) -> Self {
+    pub fn new(model_tag: CigGuid) -> Self {
         Self {
-            gender_id,
+            version: CHF_CURRENT_VERSION,
+            model_tag,
+            voice_tag: CigGuid::default(),
             dna: Dna::new(),
+            dna_byte_array: Dna::new().to_bytes(),
             item_port: None,
             materials: Vec::new(),
+            decals: Vec::new(),
         }
     }
 
     /// Parse ChfData from decompressed bytes.
+    ///
+    /// The game reads this data through `ISaveGameSerializerHelper`; the fields
+    /// here mirror the decompiled `CustomHeadFileUtils::LoadCustomHeadFile`
+    /// sequence. For tooling compatibility this also accepts the older compact
+    /// binary projection used by prior versions of this crate.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut reader = BinaryReader::new(data);
 
-        // Read gender GUID (16 bytes)
-        let guid_bytes = reader.read_bytes(16)?;
-        let gender_id = CigGuid::from_bytes(guid_bytes.try_into().unwrap());
+        let (version, model_tag, voice_tag) = match read_versioned_header(&mut reader)? {
+            Some(header) => header,
+            None => {
+                let guid_bytes = reader.read_bytes(16)?;
+                (
+                    0,
+                    CigGuid::from_bytes(guid_bytes.try_into().unwrap()),
+                    CigGuid::default(),
+                )
+            }
+        };
 
-        // Read DNA (0xD8 bytes)
         let dna_bytes = reader.read_bytes(super::dna::DNA_SIZE)?;
         let dna = Dna::parse(dna_bytes)?;
+        let dna_byte_array = dna_bytes.to_vec();
 
-        // Check if there's an item port tree
         let has_item_port = reader.remaining() >= 4;
         let item_port = if has_item_port {
-            // Peek at the next 4 bytes to see if it looks like a valid name hash
             let pos = reader.position();
-            let maybe_hash = reader.read_u32().ok();
+            let maybe_port_id = reader.read_u32().ok();
 
-            // Reset position
             reader = BinaryReader::new(&data[pos..]);
 
-            if maybe_hash.is_some() && maybe_hash != Some(0) {
-                // Try to parse item port tree
+            if maybe_port_id.is_some() && maybe_port_id != Some(0) {
                 match read_item_port(&mut reader) {
                     Ok(port) => Some(port),
                     Err(_) => None,
                 }
             } else {
+                if reader.remaining() >= 24 {
+                    reader.advance(24);
+                }
                 None
             }
         } else {
@@ -81,7 +117,7 @@ impl ChfData {
         if reader.remaining() >= 4 {
             let material_count = reader.read_u32().unwrap_or(0) as usize;
             for _ in 0..material_count {
-                if reader.remaining() < 20 {
+                if reader.remaining() < Material::MIN_BINARY_SIZE {
                     break;
                 }
                 match Material::read(&mut reader) {
@@ -91,22 +127,67 @@ impl ChfData {
             }
         }
 
+        let mut decals = Vec::new();
+        if reader.remaining() >= 4 {
+            let decal_count = reader.read_u32().unwrap_or(0) as usize;
+            for _ in 0..decal_count {
+                if reader.remaining() < Decal::BINARY_SIZE {
+                    break;
+                }
+                decals.push(Decal::read(&mut reader)?);
+            }
+        }
+
         Ok(Self {
-            gender_id,
+            version,
+            model_tag,
+            voice_tag,
             dna,
+            dna_byte_array,
             item_port,
             materials,
+            decals,
         })
     }
 
-    /// Get the gender GUID.
-    pub fn gender_id(&self) -> &CigGuid {
-        &self.gender_id
+    /// Get the serializer version.
+    pub fn version(&self) -> u32 {
+        self.version
     }
 
-    /// Set the gender GUID.
+    /// Return true if the version is accepted by the decompiled readers.
+    pub fn has_supported_version(&self) -> bool {
+        is_supported_version(self.version)
+    }
+
+    /// Get the character model tag.
+    pub fn model_tag(&self) -> &CigGuid {
+        &self.model_tag
+    }
+
+    /// Set the character model tag.
+    pub fn set_model_tag(&mut self, guid: CigGuid) {
+        self.model_tag = guid;
+    }
+
+    /// Get the character voice tag.
+    pub fn voice_tag(&self) -> &CigGuid {
+        &self.voice_tag
+    }
+
+    /// Set the character voice tag.
+    pub fn set_voice_tag(&mut self, guid: CigGuid) {
+        self.voice_tag = guid;
+    }
+
+    /// Compatibility alias for older callers. This is `modelTag` in the game serializer.
+    pub fn gender_id(&self) -> &CigGuid {
+        &self.model_tag
+    }
+
+    /// Compatibility alias for older callers. This sets `modelTag`.
     pub fn set_gender_id(&mut self, guid: CigGuid) {
-        self.gender_id = guid;
+        self.model_tag = guid;
     }
 
     /// Get the DNA data.
@@ -117,6 +198,11 @@ impl ChfData {
     /// Get mutable access to DNA data.
     pub fn dna_mut(&mut self) -> &mut Dna {
         &mut self.dna
+    }
+
+    /// Get the raw `dnaByteArray` payload.
+    pub fn dna_byte_array(&self) -> &[u8] {
+        &self.dna_byte_array
     }
 
     /// Get the item port tree, if present.
@@ -154,43 +240,83 @@ impl ChfData {
         self.materials.iter().find(|m| m.name() == name)
     }
 
+    /// Get decals.
+    pub fn decals(&self) -> &[Decal] {
+        &self.decals
+    }
+
+    /// Get mutable access to decals.
+    pub fn decals_mut(&mut self) -> &mut Vec<Decal> {
+        &mut self.decals
+    }
+
+    /// Add a decal.
+    pub fn add_decal(&mut self, decal: Decal) {
+        self.decals.push(decal);
+    }
+
     /// Convert to bytes for writing.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        // Write gender GUID
-        bytes.extend_from_slice(self.gender_id.as_bytes());
+        bytes.extend_from_slice(&self.version.to_le_bytes());
+        bytes.extend_from_slice(self.model_tag.as_bytes());
+        bytes.extend_from_slice(self.voice_tag.as_bytes());
 
-        // Write DNA
         bytes.extend_from_slice(&self.dna.to_bytes());
 
-        // Write item port tree
         if let Some(ref port) = self.item_port {
             bytes.extend_from_slice(&port.to_bytes());
         } else {
-            // Write a placeholder empty port
-            bytes.extend_from_slice(&0u32.to_le_bytes()); // name hash = 0
-            bytes.extend_from_slice(&[0u8; 16]); // nil GUID
-            bytes.extend_from_slice(&0u32.to_le_bytes()); // no children
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 16]);
+            bytes.extend_from_slice(&0u32.to_le_bytes());
         }
 
-        // Write materials
         bytes.extend_from_slice(&(self.materials.len() as u32).to_le_bytes());
         for material in &self.materials {
             bytes.extend_from_slice(&material.to_bytes());
+        }
+
+        bytes.extend_from_slice(&(self.decals.len() as u32).to_le_bytes());
+        for decal in &self.decals {
+            bytes.extend_from_slice(&decal.to_bytes());
         }
 
         bytes
     }
 }
 
+fn read_versioned_header(reader: &mut BinaryReader<'_>) -> Result<Option<(u32, CigGuid, CigGuid)>> {
+    if reader.remaining() < 4 + 16 + 16 + super::dna::DNA_SIZE {
+        return Ok(None);
+    }
+
+    let start = reader.position();
+    let version = reader.read_u32()?;
+    if !is_supported_version(version) {
+        reader.seek(start);
+        return Ok(None);
+    }
+
+    let model_bytes = reader.read_bytes(16)?;
+    let model_tag = CigGuid::from_bytes(model_bytes.try_into().unwrap());
+    let voice_bytes = reader.read_bytes(16)?;
+    let voice_tag = CigGuid::from_bytes(voice_bytes.try_into().unwrap());
+
+    Ok(Some((version, model_tag, voice_tag)))
+}
+
+/// Return true if a serializer version is accepted by the decompiled readers.
+pub const fn is_supported_version(version: u32) -> bool {
+    version >= CHF_MIN_VERSION && version <= CHF_MAX_VERSION
+}
+
 /// Read an item port tree from a binary reader.
 fn read_item_port(reader: &mut BinaryReader<'_>) -> Result<ItemPort> {
-    // Read name hash (4 bytes)
-    let name_hash = reader.read_u32()?;
-    let name = NameHash::from_raw(name_hash);
+    let item_port_def_id = reader.read_u32()?;
+    let name = NameHash::from_raw(item_port_def_id);
 
-    // Read GUID (16 bytes) - all zeros means no item attached
     let guid_bytes = reader.read_bytes(16)?;
     let item_guid = {
         let guid = CigGuid::from_bytes(guid_bytes.try_into().unwrap());
@@ -201,10 +327,8 @@ fn read_item_port(reader: &mut BinaryReader<'_>) -> Result<ItemPort> {
         }
     };
 
-    // Read child count (4 bytes)
     let child_count = reader.read_u32()? as usize;
 
-    // Sanity check to prevent infinite loops
     if child_count > 1000 {
         return Err(Error::SizeMismatch {
             expected: 0,
@@ -212,13 +336,61 @@ fn read_item_port(reader: &mut BinaryReader<'_>) -> Result<ItemPort> {
         });
     }
 
-    // Read children recursively
     let mut children = Vec::with_capacity(child_count);
     for _ in 0..child_count {
         children.push(read_item_port(reader)?);
     }
 
     Ok(ItemPort::with_children(name, item_guid, children))
+}
+
+/// A decal entry from the version 8+ `Decals` serializer node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decal {
+    pub decal_material_guid: CigGuid,
+    pub projection_center: [f32; 3],
+    pub projection_direction: [f32; 3],
+    pub angle: f32,
+    pub diameter: f32,
+    pub decal_alpha: f32,
+}
+
+impl Decal {
+    /// Binary size of the compact projection used by this crate.
+    pub const BINARY_SIZE: usize = 16 + 12 + 12 + 4 + 4 + 4;
+
+    pub fn read(reader: &mut BinaryReader<'_>) -> Result<Self> {
+        let guid_bytes = reader.read_bytes(16)?;
+        let decal_material_guid = CigGuid::from_bytes(guid_bytes.try_into().unwrap());
+        let projection_center = [reader.read_f32()?, reader.read_f32()?, reader.read_f32()?];
+        let projection_direction = [reader.read_f32()?, reader.read_f32()?, reader.read_f32()?];
+        let angle = reader.read_f32()?;
+        let diameter = reader.read_f32()?;
+        let decal_alpha = reader.read_f32()?;
+
+        Ok(Self {
+            decal_material_guid,
+            projection_center,
+            projection_direction,
+            angle,
+            diameter,
+            decal_alpha,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(Self::BINARY_SIZE);
+        bytes.extend_from_slice(self.decal_material_guid.as_bytes());
+        for value in self
+            .projection_center
+            .iter()
+            .chain(self.projection_direction.iter())
+            .chain([&self.angle, &self.diameter, &self.decal_alpha])
+        {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
 }
 
 #[cfg(test)]
@@ -230,8 +402,75 @@ mod tests {
         let guid = CigGuid::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         let data = ChfData::new(guid);
 
+        assert_eq!(data.version(), CHF_CURRENT_VERSION);
+        assert_eq!(data.model_tag().as_bytes(), guid.as_bytes());
         assert_eq!(data.gender_id().as_bytes(), guid.as_bytes());
         assert!(data.item_port().is_none());
         assert!(data.materials().is_empty());
+        assert!(data.decals().is_empty());
+        assert!(data.has_supported_version());
+    }
+
+    #[test]
+    fn version_guard_matches_decompiled_readers() {
+        assert!(!is_supported_version(1));
+        assert!(is_supported_version(2));
+        assert!(is_supported_version(9));
+        assert!(!is_supported_version(10));
+    }
+
+    #[test]
+    fn parses_versioned_character_customization_projection() {
+        let model_tag =
+            CigGuid::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        let voice_tag =
+            CigGuid::from_bytes([16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&CHF_CURRENT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(model_tag.as_bytes());
+        bytes.extend_from_slice(voice_tag.as_bytes());
+        bytes.extend_from_slice(&Dna::new().to_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let data = ChfData::parse(&bytes).unwrap();
+
+        assert_eq!(data.version(), CHF_CURRENT_VERSION);
+        assert_eq!(data.model_tag().as_bytes(), model_tag.as_bytes());
+        assert_eq!(data.voice_tag().as_bytes(), voice_tag.as_bytes());
+        assert_eq!(data.dna_byte_array().len(), super::super::dna::DNA_SIZE);
+    }
+
+    #[test]
+    fn skips_empty_loadout_placeholder_before_decals() {
+        let decal = Decal {
+            decal_material_guid: CigGuid::from_bytes([3; 16]),
+            projection_center: [1.0, 2.0, 3.0],
+            projection_direction: [0.0, 1.0, 0.0],
+            angle: 90.0,
+            diameter: 0.5,
+            decal_alpha: 0.75,
+        };
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&CHF_CURRENT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(CigGuid::default().as_bytes());
+        bytes.extend_from_slice(CigGuid::default().as_bytes());
+        bytes.extend_from_slice(&Dna::new().to_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&decal.to_bytes());
+
+        let data = ChfData::parse(&bytes).unwrap();
+
+        assert!(data.item_port().is_none());
+        assert_eq!(data.decals(), std::slice::from_ref(&decal));
     }
 }

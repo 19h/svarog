@@ -14,7 +14,7 @@ pub enum Error {
     Common(#[from] svarog_common::Error),
 
     /// Unsupported database version.
-    #[error("unsupported DataCore version: {0} (expected 5 or 6)")]
+    #[error("unsupported DataCore version: {0} (expected 5 through 8)")]
     UnsupportedVersion(u32),
 
     /// String offset out of bounds.

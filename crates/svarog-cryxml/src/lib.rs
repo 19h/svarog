@@ -77,3 +77,16 @@ pub use error::{Error, Result};
 pub use header::CryXmlHeader;
 pub use node::CryXmlNode;
 pub use parser::CryXml;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_layout_matches_decompiled_reader() {
+        assert_eq!(CryXmlHeader::MAGIC_LEN, 8);
+        assert_eq!(std::mem::size_of::<CryXmlHeader>(), 36);
+        assert_eq!(std::mem::size_of::<CryXmlNode>(), 28);
+        assert_eq!(std::mem::size_of::<CryXmlAttribute>(), 8);
+    }
+}

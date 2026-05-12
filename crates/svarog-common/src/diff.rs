@@ -173,7 +173,10 @@ pub fn generate_added_diff(content: &str, label: &str) -> TextDiff {
     let mut lines = Vec::new();
     let mut additions = 0;
 
-    lines.push(DiffLine::new(DiffLineKind::Header, format!("+++ {}", label)));
+    lines.push(DiffLine::new(
+        DiffLineKind::Header,
+        format!("+++ {}", label),
+    ));
 
     for line in content.lines() {
         lines.push(DiffLine::new(DiffLineKind::Added, format!("+{}", line)));
@@ -194,7 +197,10 @@ pub fn generate_removed_diff(content: &str, label: &str) -> TextDiff {
     let mut lines = Vec::new();
     let mut deletions = 0;
 
-    lines.push(DiffLine::new(DiffLineKind::Header, format!("--- {}", label)));
+    lines.push(DiffLine::new(
+        DiffLineKind::Header,
+        format!("--- {}", label),
+    ));
 
     for line in content.lines() {
         lines.push(DiffLine::new(DiffLineKind::Removed, format!("-{}", line)));

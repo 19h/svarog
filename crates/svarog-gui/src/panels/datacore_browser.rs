@@ -95,7 +95,9 @@ impl DataCoreBrowserPanel {
                                     state.worker_sender.clone(),
                                 );
                             } else {
-                                state.show_error("Cannot compare: original DCB data not available.".to_string());
+                                state.show_error(
+                                    "Cannot compare: original DCB data not available.".to_string(),
+                                );
                             }
                         }
                     }
@@ -1344,10 +1346,8 @@ fn render_dcb_comparison_item(
                     color
                 };
 
-                let response = ui.selectable_label(
-                    is_selected,
-                    RichText::new(&item.name).color(name_color),
-                );
+                let response =
+                    ui.selectable_label(is_selected, RichText::new(&item.name).color(name_color));
 
                 if response.clicked() {
                     let item_type = item.item_type.clone();

@@ -456,11 +456,7 @@ fn build_struct_reference_index(db: Arc<DataCoreDatabase>, sender: Sender<Worker
 }
 
 /// Compare two P4K archives in a background thread
-pub fn compare_p4k(
-    old_path: PathBuf,
-    new_path: PathBuf,
-    sender: Sender<WorkerMessage>,
-) {
+pub fn compare_p4k(old_path: PathBuf, new_path: PathBuf, sender: Sender<WorkerMessage>) {
     std::thread::spawn(move || {
         let old_archive = match P4kArchive::open(&old_path) {
             Ok(a) => Arc::new(a),
@@ -566,15 +562,20 @@ pub fn compare_dcb(
         };
 
         let sender_clone = sender.clone();
-        let result = compare_databases_with_progress(&old_db, &new_db, scope, &mut |phase, current, total| {
-            sender_clone
-                .send(WorkerMessage::DcbComparisonProgress {
-                    phase: phase.to_string(),
-                    current,
-                    total,
-                })
-                .ok();
-        });
+        let result = compare_databases_with_progress(
+            &old_db,
+            &new_db,
+            scope,
+            &mut |phase, current, total| {
+                sender_clone
+                    .send(WorkerMessage::DcbComparisonProgress {
+                        phase: phase.to_string(),
+                        current,
+                        total,
+                    })
+                    .ok();
+            },
+        );
 
         sender
             .send(WorkerMessage::DcbComparisonReady(Ok(DcbComparisonState {
@@ -640,15 +641,20 @@ pub fn compare_dcb_from_data(
         };
 
         let sender_clone = sender.clone();
-        let result = compare_databases_with_progress(&old_db, &new_db, scope, &mut |phase, current, total| {
-            sender_clone
-                .send(WorkerMessage::DcbComparisonProgress {
-                    phase: phase.to_string(),
-                    current,
-                    total,
-                })
-                .ok();
-        });
+        let result = compare_databases_with_progress(
+            &old_db,
+            &new_db,
+            scope,
+            &mut |phase, current, total| {
+                sender_clone
+                    .send(WorkerMessage::DcbComparisonProgress {
+                        phase: phase.to_string(),
+                        current,
+                        total,
+                    })
+                    .ok();
+            },
+        );
 
         sender
             .send(WorkerMessage::DcbComparisonReady(Ok(DcbComparisonState {
@@ -760,15 +766,20 @@ pub fn compare_dcb_from_data_or_p4k(
         };
 
         let sender_clone = sender.clone();
-        let result = compare_databases_with_progress(&old_db, &new_db, scope, &mut |phase, current, total| {
-            sender_clone
-                .send(WorkerMessage::DcbComparisonProgress {
-                    phase: phase.to_string(),
-                    current,
-                    total,
-                })
-                .ok();
-        });
+        let result = compare_databases_with_progress(
+            &old_db,
+            &new_db,
+            scope,
+            &mut |phase, current, total| {
+                sender_clone
+                    .send(WorkerMessage::DcbComparisonProgress {
+                        phase: phase.to_string(),
+                        current,
+                        total,
+                    })
+                    .ok();
+            },
+        );
 
         sender
             .send(WorkerMessage::DcbComparisonReady(Ok(DcbComparisonState {
@@ -816,10 +827,7 @@ pub fn generate_file_diff(
         );
 
         sender
-            .send(WorkerMessage::FileDiffReady {
-                path,
-                diff,
-            })
+            .send(WorkerMessage::FileDiffReady { path, diff })
             .ok();
     });
 }

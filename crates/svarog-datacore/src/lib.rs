@@ -175,7 +175,10 @@ pub mod export;
 pub mod structs;
 
 // Primary API
-pub use database::{DataCoreDatabase, PoolCounts, PoolType};
+pub use database::{
+    is_supported_version, DataCoreDatabase, PoolCounts, PoolType, MAX_SUPPORTED_VERSION,
+    MIN_SUPPORTED_VERSION,
+};
 pub use error::{Error, Result};
 pub use instance::{ArrayIterator, Instance, Property, PropertyIterator, Record};
 pub use query::{Query, QueryIterator};

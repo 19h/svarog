@@ -21,6 +21,17 @@ use crate::{Error, Result};
 
 type FxHashMap<K, V> = FastHashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
+/// Oldest DataCore binary version supported by this parser.
+pub const MIN_SUPPORTED_VERSION: u32 = 5;
+
+/// Newest DataCore binary version supported by this parser.
+pub const MAX_SUPPORTED_VERSION: u32 = 8;
+
+#[inline]
+pub const fn is_supported_version(version: u32) -> bool {
+    version >= MIN_SUPPORTED_VERSION && version <= MAX_SUPPORTED_VERSION
+}
+
 /// Pool counts for copying databases.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PoolCounts {
@@ -84,6 +95,7 @@ pub struct DataCoreDatabase {
     /// Raw data pointer for zero-copy access
     data: *const u8,
     data_len: usize,
+    version: u32,
 
     // Schema definitions (small, worth copying for cache locality)
     struct_definitions: Vec<DataCoreStructDefinition>,
@@ -193,7 +205,7 @@ impl DataCoreDatabase {
         let _unknown1 = reader.read_u32()?;
         let version = reader.read_u32()?;
 
-        if version < 5 || version > 6 {
+        if !is_supported_version(version) {
             return Err(Error::UnsupportedVersion(version));
         }
 
@@ -353,6 +365,7 @@ impl DataCoreDatabase {
             _owned_data: None,
             data: data_ptr,
             data_len,
+            version,
             struct_definitions,
             property_definitions,
             enum_definitions,
@@ -411,6 +424,11 @@ impl DataCoreDatabase {
     }
 
     // Accessor methods
+
+    #[inline]
+    pub fn version(&self) -> u32 {
+        self.version
+    }
 
     #[inline]
     pub fn struct_definitions(&self) -> &[DataCoreStructDefinition] {
@@ -936,10 +954,27 @@ impl DataCoreDatabase {
 impl std::fmt::Debug for DataCoreDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DataCoreDatabase")
+            .field("version", &self.version)
             .field("structs", &self.struct_definitions.len())
             .field("properties", &self.property_definitions.len())
             .field("enums", &self.enum_definitions.len())
             .field("records", &self.records.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_versions_include_current_dcb_range() {
+        assert!(!is_supported_version(MIN_SUPPORTED_VERSION - 1));
+
+        for version in MIN_SUPPORTED_VERSION..=MAX_SUPPORTED_VERSION {
+            assert!(is_supported_version(version));
+        }
+
+        assert!(!is_supported_version(MAX_SUPPORTED_VERSION + 1));
     }
 }

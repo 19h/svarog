@@ -232,11 +232,9 @@ pub fn render_diff_view(ui: &mut Ui, diff: &TextDiff) {
                 let text = format!("{}{}", prefix, line.content);
 
                 if let Some(bg) = bg_color {
-                    egui::Frame::none()
-                        .fill(bg)
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(&text).monospace().color(fg_color));
-                        });
+                    egui::Frame::none().fill(bg).show(ui, |ui| {
+                        ui.label(RichText::new(&text).monospace().color(fg_color));
+                    });
                 } else {
                     ui.label(RichText::new(&text).monospace().color(fg_color));
                 }
