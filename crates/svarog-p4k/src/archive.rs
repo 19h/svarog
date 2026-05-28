@@ -1013,9 +1013,9 @@ impl P4kArchive {
         uncompressed_size: u64,
         compression_method: CompressionMethod,
         is_encrypted: bool,
-        crc32: u32,
-        last_mod_file_time: u16,
-        last_mod_file_date: u16,
+        _crc32: u32,
+        _last_mod_file_time: u16,
+        _last_mod_file_date: u16,
         expected_sha256: [u8; 32],
     ) -> Result<Vec<u8>> {
         let offset = usize::try_from(local_header_offset).map_err(|_| {
@@ -1073,14 +1073,7 @@ impl P4kArchive {
 
         let mut reader = BinaryReader::new(&self.mmap[header_start..]);
         let local_header: LocalFileHeader = reader.read_struct()?;
-        validate_v1_local_header_metadata(
-            &local_header,
-            expected_name,
-            compression_method,
-            crc32,
-            last_mod_file_time,
-            last_mod_file_date,
-        )?;
+        validate_v1_local_header_metadata(&local_header)?;
         validate_v1_local_extra_fields(
             &self.mmap,
             offset,
@@ -1282,10 +1275,10 @@ impl P4kArchive {
         local_header_offset: u64,
         compressed_size: u64,
         uncompressed_size: u64,
-        compression_method: CompressionMethod,
-        crc32: u32,
-        last_mod_file_time: u16,
-        last_mod_file_date: u16,
+        _compression_method: CompressionMethod,
+        _crc32: u32,
+        _last_mod_file_time: u16,
+        _last_mod_file_date: u16,
         expected_sha256: [u8; 32],
     ) -> Result<(u64, u64, bool)> {
         let offset = usize::try_from(local_header_offset).map_err(|_| {
@@ -1338,14 +1331,7 @@ impl P4kArchive {
 
         let mut reader = BinaryReader::new(&self.mmap[header_start..]);
         let local_header: LocalFileHeader = reader.read_struct()?;
-        validate_v1_local_header_metadata(
-            &local_header,
-            expected_name,
-            compression_method,
-            crc32,
-            last_mod_file_time,
-            last_mod_file_date,
-        )?;
+        validate_v1_local_header_metadata(&local_header)?;
         validate_v1_local_extra_fields(
             &self.mmap,
             offset,
@@ -1548,46 +1534,52 @@ impl P4kArchive {
         Vec<P4kFreelistBlock>,
         P4kArchiveLayout,
     )> {
-        let reserved_08 = eocdr.reserved_08;
-        let reserved_20 = eocdr.reserved_20;
-        let reserved_38 = eocdr.reserved_38;
-        let reserved_50 = eocdr.reserved_50;
-        let reserved_58 = eocdr.reserved_58;
-        for (name, value) in [
-            ("reserved_08", reserved_08),
-            ("reserved_20", reserved_20),
-            ("reserved_38", reserved_38),
-            ("reserved_50", reserved_50),
-            ("reserved_58", reserved_58),
-        ] {
-            if value != 0 {
-                return Err(Error::MalformedV2Eocdr(format!(
-                    "{name} is {value}, expected 0"
-                )));
-            }
-        }
-        let flag_68 = eocdr.flag_68;
-        if flag_68 != 1 {
+        let status_flags = eocdr.status_flags;
+        if status_flags & 1 != 0 {
             return Err(Error::MalformedV2Eocdr(format!(
-                "flag_68 is {flag_68}, expected 1"
+                "status_flags is {status_flags:#04x}, incomplete bit is set"
             )));
         }
 
-        let cdr_start = usize::try_from(eocdr.end_of_file_block_offset)
+        let cdr_start = usize::try_from(eocdr.central_directory_record_offset)
             .map_err(|_| Error::MalformedV2Eocdr("CDR offset overflows usize".to_string()))?;
-        let cdr_size = usize::try_from(eocdr.cdr_size)
+        let cdr_base_size = usize::try_from(eocdr.central_directory_record_size)
             .map_err(|_| Error::MalformedV2Eocdr("CDR size overflows usize".to_string()))?;
-        let num_entries = usize::try_from(eocdr.num_file_entries)
+        let cdr_extension_size = usize::try_from(eocdr.central_directory_record_extension_size)
+            .map_err(|_| {
+                Error::MalformedV2Eocdr("CDR extension size overflows usize".to_string())
+            })?;
+        let cdr_size = cdr_base_size
+            .checked_add(cdr_extension_size)
+            .ok_or_else(|| Error::MalformedV2Eocdr("CDR size overflow".to_string()))?;
+        let base_entries = usize::try_from(eocdr.number_of_entries)
             .map_err(|_| Error::MalformedV2Eocdr("entry count overflows usize".to_string()))?;
+        let extension_entries =
+            usize::try_from(eocdr.number_of_extension_entries).map_err(|_| {
+                Error::MalformedV2Eocdr("extension entry count overflows usize".to_string())
+            })?;
+        let num_entries = base_entries
+            .checked_add(extension_entries)
+            .ok_or_else(|| Error::MalformedV2Eocdr("entry count overflow".to_string()))?;
         let num_freelist_blocks = usize::try_from(eocdr.num_freelist_blocks).map_err(|_| {
             Error::MalformedV2Eocdr("freelist block count overflows usize".to_string())
         })?;
-        let names_start = usize::try_from(eocdr.name_table_abs_offset).map_err(|_| {
-            Error::MalformedV2Eocdr("name table offset overflows usize".to_string())
-        })?;
-        let names_len = usize::try_from(eocdr.total_name_length)
+        let names_start =
+            usize::try_from(eocdr.central_directory_record_text_offset).map_err(|_| {
+                Error::MalformedV2Eocdr("name table offset overflows usize".to_string())
+            })?;
+        let names_base_len = usize::try_from(eocdr.central_directory_record_text_size)
             .map_err(|_| Error::MalformedV2Eocdr("name table size overflows usize".to_string()))?;
-        let end_of_payload = usize::try_from(eocdr.end_of_payload)
+        let names_extension_len =
+            usize::try_from(eocdr.central_directory_record_extension_text_size).map_err(|_| {
+                Error::MalformedV2Eocdr("name table extension size overflows usize".to_string())
+            })?;
+        let names_len = names_base_len
+            .checked_add(names_extension_len)
+            .ok_or_else(|| Error::MalformedV2Eocdr("name table size overflow".to_string()))?;
+        let trie_cache_size = usize::try_from(eocdr.trie_cache_size)
+            .map_err(|_| Error::MalformedV2Eocdr("trie cache size overflows usize".to_string()))?;
+        let end_of_payload = usize::try_from(eocdr.end_of_payload_offset)
             .map_err(|_| Error::MalformedV2Eocdr("end_of_payload overflows usize".to_string()))?;
         let physical_sector_size = eocdr.physical_sector_size;
         if physical_sector_size == 0 || !physical_sector_size.is_power_of_two() {
@@ -1633,8 +1625,18 @@ impl P4kArchive {
                 names_start, cdr_end
             )));
         }
+        let trie_cache_start = usize::try_from(eocdr.trie_cache_offset).map_err(|_| {
+            Error::MalformedV2Eocdr("trie cache offset overflows usize".to_string())
+        })?;
+        if trie_cache_size != 0 && trie_cache_start != names_end {
+            return Err(Error::MalformedV2Eocdr(format!(
+                "trie cache offset {} does not follow name table end {}",
+                trie_cache_start, names_end
+            )));
+        }
         let eof_used = cdr_size
             .checked_add(names_len)
+            .and_then(|value| value.checked_add(trie_cache_size))
             .and_then(|value| value.checked_add(EOCD_V2_SIZE))
             .ok_or_else(|| Error::MalformedV2Eocdr("EOF buffer size overflow".to_string()))?;
         let eof_aligned = eof_used
@@ -1650,18 +1652,28 @@ impl P4kArchive {
             )));
         }
         let eocdr_start = actual_end - EOCD_V2_SIZE;
-        if cdr_end > data.len() || names_end > data.len() {
+        let trie_cache_end = if trie_cache_size == 0 {
+            names_end
+        } else {
+            trie_cache_start
+                .checked_add(trie_cache_size)
+                .ok_or_else(|| Error::MalformedV2Eocdr("trie cache range overflow".to_string()))?
+        };
+        if cdr_end > data.len() || names_end > data.len() || trie_cache_end > data.len() {
             return Err(Error::MalformedV2Eocdr(
-                "cdr or name table extends past file end".to_string(),
+                "cdr, name table, or trie cache extends past file end".to_string(),
             ));
         }
-        if names_end > eocdr_start {
+        if trie_cache_end > eocdr_start {
             return Err(Error::MalformedV2Eocdr(format!(
-                "name table end {} overlaps EOCDR at {}",
-                names_end, eocdr_start
+                "trie cache end {} overlaps EOCDR at {}",
+                trie_cache_end, eocdr_start
             )));
         }
-        if data[names_end..eocdr_start].iter().any(|byte| *byte != 0) {
+        if data[trie_cache_end..eocdr_start]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
             return Err(Error::MalformedV2Eocdr(
                 "non-zero EOF padding before EOCDR".to_string(),
             ));
@@ -1731,13 +1743,15 @@ impl P4kArchive {
             file_size: data.len() as u64,
             actual_content_end: actual_end as u64,
             physical_sector_size: Some(eocdr.physical_sector_size),
-            cdr_offset: eocdr.end_of_file_block_offset,
-            cdr_size: eocdr.cdr_size,
-            name_table_offset: Some(eocdr.name_table_abs_offset),
-            name_table_size: eocdr.total_name_length,
-            end_of_payload: Some(eocdr.end_of_payload),
-            install_block_offset: Some(eocdr.end_of_payload),
-            install_block_size: Some(eocdr.end_of_file_block_offset - eocdr.end_of_payload),
+            cdr_offset: eocdr.central_directory_record_offset,
+            cdr_size: cdr_size as u64,
+            name_table_offset: Some(eocdr.central_directory_record_text_offset),
+            name_table_size: names_len as u64,
+            end_of_payload: Some(eocdr.end_of_payload_offset),
+            install_block_offset: Some(eocdr.end_of_payload_offset),
+            install_block_size: Some(
+                eocdr.central_directory_record_offset - eocdr.end_of_payload_offset,
+            ),
             eocd_offset: (actual_end - EOCD_V2_SIZE) as u64,
             manifest_sha256: Some(eocdr.manifest_sha256),
         };
@@ -3264,14 +3278,7 @@ fn validate_v1_cdr_fixed_header(header: &CentralDirectoryHeader) -> Result<()> {
     Ok(())
 }
 
-fn validate_v1_local_header_metadata(
-    local_header: &LocalFileHeader,
-    expected_name: &str,
-    compression_method: CompressionMethod,
-    crc32: u32,
-    last_mod_file_time: u16,
-    last_mod_file_date: u16,
-) -> Result<()> {
+fn validate_v1_local_header_metadata(local_header: &LocalFileHeader) -> Result<()> {
     let version_needed = local_header.version_needed;
     if version_needed != 45 {
         return Err(Error::MalformedV1Entry(format!(
@@ -3284,40 +3291,11 @@ fn validate_v1_local_header_metadata(
             "local header flags {flags}, expected 0"
         )));
     }
-    let local_method = local_header.compression_method;
-    if local_method != compression_method as u16 {
-        return Err(Error::MalformedV1Entry(format!(
-            "local header compression method {local_method}, expected {}",
-            compression_method as u16
-        )));
-    }
-    let local_last_mod_file_time = (local_header.last_modified & 0xFFFF) as u16;
-    let local_last_mod_file_date = (local_header.last_modified >> 16) as u16;
-    if local_last_mod_file_time != last_mod_file_time
-        || local_last_mod_file_date != last_mod_file_date
-    {
-        return Err(Error::MalformedV1Entry(format!(
-            "local header DOS timestamp {local_last_mod_file_time:#06x}/{local_last_mod_file_date:#06x}, expected {last_mod_file_time:#06x}/{last_mod_file_date:#06x}"
-        )));
-    }
-    let local_crc32 = local_header.crc32;
-    if local_crc32 != crc32 {
-        return Err(Error::MalformedV1Entry(format!(
-            "local header CRC32 {local_crc32:#010x}, expected {crc32:#010x}"
-        )));
-    }
     let local_compressed_size = local_header.compressed_size;
     let local_uncompressed_size = local_header.uncompressed_size;
     if local_compressed_size != u32::MAX || local_uncompressed_size != u32::MAX {
         return Err(Error::MalformedV1Entry(format!(
             "local header size sentinels {local_compressed_size:#010x}/{local_uncompressed_size:#010x}, expected 0xffffffff/0xffffffff"
-        )));
-    }
-    let local_name_len = local_header.file_name_length as usize;
-    let expected_name_len = expected_name.len();
-    if local_name_len != expected_name_len {
-        return Err(Error::MalformedV1Entry(format!(
-            "local header file_name_length {local_name_len}, expected {expected_name_len}"
         )));
     }
     Ok(())
@@ -3361,10 +3339,16 @@ fn validate_v1_local_extra_fields(
             "local file name extends past file end".to_string(),
         ));
     }
-    if &data[name_start..name_end] != expected_name.as_bytes() {
-        return Err(Error::MalformedV1Entry(
-            "local header file name does not match CDR".to_string(),
-        ));
+    let local_name_bytes = &data[name_start..name_end];
+    if local_name_bytes != expected_name.as_bytes()
+        && normalize_p4k_path_bytes(local_name_bytes, false) != expected_name
+        && normalize_p4k_path_bytes(local_name_bytes, true)
+            != normalize_p4k_path_bytes(expected_name.as_bytes(), true)
+    {
+        let local_name = String::from_utf8_lossy(local_name_bytes);
+        return Err(Error::MalformedV1Entry(format!(
+            "local header file name does not match CDR at local offset {local_header_offset:#x}: local={local_name:?}, cdr={expected_name:?}"
+        )));
     }
     let extra_start = name_end;
     let extra_end = extra_start

@@ -282,6 +282,13 @@ enum Commands {
         manifest_sha256: Option<String>,
     },
 
+    /// Rebuild only the metadata tail of an existing P4K v2 archive
+    P4kRewriteV2Tail {
+        /// Path to the P4K v2 file to update in place
+        #[arg(short, long, env = "INPUT_P4K")]
+        p4k: PathBuf,
+    },
+
     /// Convert a CryXmlB file to XML
     CryxmlConvert {
         /// Input CryXmlB file
@@ -493,6 +500,9 @@ fn main() -> Result<()> {
             manifest_sha256,
         } => {
             cmd_p4k_convert_v2(&input, &output, sector_size, manifest_sha256.as_deref())?;
+        }
+        Commands::P4kRewriteV2Tail { p4k } => {
+            cmd_p4k_rewrite_v2_tail(&p4k)?;
         }
         Commands::CryxmlConvert { input, output } => {
             cmd_cryxml_convert(&input, &output)?;
@@ -1797,6 +1807,19 @@ fn cmd_p4k_convert_v2(
         "Converted {} entries to {} ({} bytes, CDR at 0x{:X})",
         stats.entry_count,
         output.display(),
+        stats.file_size,
+        stats.cdr_offset
+    );
+    Ok(())
+}
+
+fn cmd_p4k_rewrite_v2_tail(p4k: &PathBuf) -> Result<()> {
+    let stats =
+        svarog::p4k::rewrite_v2_tail_in_place(p4k).context("Failed to rewrite P4K v2 tail")?;
+    println!(
+        "Rewrote v2 tail for {} ({} entries, {} bytes, CDR at 0x{:X})",
+        p4k.display(),
+        stats.entry_count,
         stats.file_size,
         stats.cdr_offset
     );

@@ -1,10 +1,10 @@
 //! Central Directory entry for P4K v2 ("JiJi") format.
 //!
 //! Unlike v1, v2 archives use a fixed-size per-entry record stored
-//! contiguously starting at `Eocd2Record::end_of_file_block_offset`.
+//! contiguously starting at `Eocd2Record::central_directory_record_offset`.
 //! Each entry is exactly [`CDR_V2_ENTRY_SIZE`] bytes; names live in a
 //! separate name table that begins at
-//! `Eocd2Record::name_table_abs_offset`.
+//! `Eocd2Record::central_directory_record_text_offset`.
 //!
 //! In v2 there are NO local file headers preceding the compressed
 //! payload — `offset_to_file_data` points directly at the compressed

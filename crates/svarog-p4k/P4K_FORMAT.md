@@ -213,17 +213,23 @@ directly for reads, dumps, conversion, and raw SHA verification; mixed
 or inconclusive archives fall back to per-entry SHA-256 selection when
 both layouts are plausible. ZIP-local placement is sampled because local
 retail `Data.p4k` validation showed that placement for sampled entries.
-The verification path cross-checks v1 central-directory metadata against
-the local header before reading payload bytes: version needed `45`, flags
-`0`, compression method, DOS time/date, CRC32C, ZIP64 size sentinels,
-and file-name length/bytes must agree with the CDR. `svarog-p4k` also validates that
-the local fixed header, name, and extra-field span equals the physical
-sector size when the P4K CI comment is present, and that the local ZIP64
-field matches the CDR sizes and disk `0`. Retail v1 archives
-store either the CDR local-header offset or `0` in the local ZIP64 offset
-slot, so both are accepted. The following `0x0666` dummy field must occupy
-the remaining local extra space. Its id and size are validated, but its
-padding bytes are not interpreted: `WriteLocalFileHeaderToBuffer_v1`
+The v1 CDR is authoritative for method, DOS time/date, CRC32C, sizes,
+signature, encryption, and SHA-256. The official converter uses each
+loaded CDR entry's `offset_to_file_data`, `compressed_size`, and
+`GetLocalFileRecordSize`; it does not re-read local-header method/time
+metadata. Retail v1 archives can therefore contain redundant local
+headers whose path separators, path casing, or DOS timestamps differ
+from the CDR.
+`svarog-p4k` validates the local header structure needed to locate the
+payload: version needed `45`, flags `0`, ZIP64 size sentinels, the
+local fixed header/name/extra-field span equals the physical sector
+size when the P4K CI comment is present, the local name normalizes to
+the CDR path, and the local ZIP64 field matches the CDR sizes and disk
+`0`. Retail v1 archives store either the CDR local-header offset or `0`
+in the local ZIP64 offset slot, so both are accepted. The following
+`0x0666` dummy field must occupy the remaining local extra space. Its
+id and size are validated, but its padding bytes are not interpreted:
+`WriteLocalFileHeaderToBuffer_v1`
 only writes the dummy field header, and retail archives can contain
 non-zero bytes in the unused tail.
 Fresh v1 writes place the next local record at the next physical sector
@@ -292,6 +298,7 @@ V2 removes ZIP local headers and writes payloads directly:
 [padding to 64 KiB CDR boundary]
 [CDR: entry_count * 0xCC]
 [name table: NUL-terminated normalized paths]
+[trie cache: file-trie header/storage/value table plus folder-trie root]
 [zero padding to place EOCDR at end of the aligned EOF buffer]
 [EOCDR: 0xAF bytes ending in version=2, magic="JiJi"]
 ```
@@ -329,22 +336,35 @@ Important EOCDR offsets:
 | Offset | Type | Meaning |
 | ---: | --- | --- |
 | `0x00` | `u64` | number of file entries |
+| `0x08` | `u64` | number of extension/subarchive entries |
 | `0x10` | `u64` | CDR start offset |
 | `0x18` | `u64` | CDR byte size |
+| `0x20` | `u64` | extension CDR byte size |
 | `0x28` | `u64` | name-table absolute offset |
 | `0x30` | `u64` | total name-table length |
+| `0x38` | `u64` | extension name-table byte size |
 | `0x40` | `u64` | end of payload area |
 | `0x48` | `u64` | freelist block count |
+| `0x50` | `u64` | trie-cache absolute offset |
+| `0x58` | `u64` | trie-cache byte size |
 | `0x60` | `u64` | physical sector size |
-| `0x68` | `u8` | writer flag, observed as `1` |
+| `0x68` | `u8` | status flags; bit 0 marks an incomplete archive |
 | `0x69` | `[u8; 64]` | manifest digests |
 | `0xA9` | `u16` | version |
 | `0xAB` | `u32` | magic |
 
-The reserved EOCDR slots at `0x08`, `0x20`, `0x38`, `0x50`, and
-`0x58` are written as zero by `UpdateAndWriteCDR_v2`; `svarog-p4k`
-rejects v2 archives where any of those fields are nonzero. The byte at
-`0x68` is likewise treated as a fixed writer flag and must be `1`.
+The retail SQ42 loader maps one contiguous tail buffer from the CDR start
+through the trie cache. It initializes the lookup trie from the cache at
+EOCDR offset `0x50`; a zero cache pointer is interpreted as an invalid
+negative offset from the CDR base. The cache begins with four `u32`
+values: file-trie storage byte size, file-trie value-table byte size,
+folder-trie storage byte size, and folder-trie value-table byte size.
+File-trie storage follows at cache offset `0x10`, then a `u32` value table
+maps terminal trie values to CDR entry indexes.
+
+The byte at `0x68` is checked by `CigP4KSystem::GetVersion` and
+`CP4kCDR_v2_Base::ParseCentralDirectoryRecords_*`: bit 0 set means the
+archive is incomplete. Complete archives write this byte as `0`.
 
 The v2 writer does not derive these manifest digests from the CDR. The
 official wrapper accepts an optional 64-byte digest buffer, stores it in
@@ -376,8 +396,8 @@ first NUL before the next offset. `LoadPakFile_v2` follows each
 require the name table to be tightly packed.
 
 On load, `LoadPakFile_v2` sizes the install buffer as
-`8 * (num_file_entries + 2 * num_freelist_blocks)`, reads it from
-`end_of_payload`, uses the first `num_file_entries * 8` bytes as
+`8 * (number_of_entries + 2 * num_freelist_blocks)`, reads it from
+`end_of_payload`, uses the first `number_of_entries * 8` bytes as
 `bytes_already_written_to_disk`, and copies the following
 `num_freelist_blocks * 16` bytes into the freelist vector. Persisted
 freelist records with `size == 0`, or whose `offset + size` overflows,
@@ -522,7 +542,7 @@ The crate tests pin:
 - parallel dump-to-directory path under the `parallel` feature, with CLI worker-count control, one-time parent-directory creation for unique output paths, ordered sequential fallback for duplicate output paths, and explicit output flushing so late buffered write errors are reported
 - CLI P4K extraction planning filters archive entries, detects DCB/SOCPAK paths, performs incremental skip checks, and builds extraction tasks in one archive pass without retaining a duplicate matched-entry name list; extension checks use ASCII case-insensitive suffix comparison without lowercasing each path
 - CLI SOCPAK expansion extracts the `.socpak` P4K entry to disk and opens that file as the ZIP source, avoiding a whole-SOCPAK resident buffer; nested ZIP members then probe only the first eight bytes and stream non-CryXML files directly to disk, while `CryXmlB\0` candidates must also pass cheap 36-byte header bounds validation before the member is buffered for binary-to-XML conversion
-- v2 writer byte layout, install block, and readback
+- v2 writer byte layout, install block, trie cache, and readback
 - v2 writer derives `offset_to_filename` from a running name-table cursor instead of retaining a per-entry offset vector, matching the official packed-name-table order while reducing large-create/convert metadata memory
 - v2 writer checked CDR/name-table/EOF tail size arithmetic, including CDR offset overflow rejection
 - v1/v2 writer ordering of newly added entries by compressed size and deterministic filename-handle tie-break; fresh writer filename-handle assignment normalizes each staged path once, sorts the normalized names, and assigns handles back by original entry index to avoid a second per-entry normalization pass
@@ -547,7 +567,7 @@ The crate tests pin:
 - v1 reader and converter SHA-256 selection for ZIP-local retail payload placement
 - v1 writer exact `CIG\0\x01\0` EOCD comment prefix and fields
 - v1 writer physical-sector alignment between entries
-- v1 reader rejection for local-header filename length/byte mismatches
+- v1 reader acceptance of retail local-header names that normalize to the CDR path, including backslash separator and case variants
 - v1 filename-handle duplicate collapse and conversion of removed spans into freelist blocks
 - v1 filename-handle duplicate collapse borrows already-normalized lowercase path keys and only allocates when the key must be normalized/lowercased, preserving duplicate semantics while reducing large-archive open memory churn
 - v1/v2 encrypted stored and encrypted compressed writer output and readback
@@ -580,8 +600,7 @@ The crate tests pin:
 - malformed v1/v2 non-boolean encryption-flag rejection
 - malformed v1 ZIP64 EOCD and locator fixed-field rejection
 - malformed v1 ZIP64 entry-count rejection above the official loader's 32-bit count path
-- malformed v1 local-header metadata mismatch rejection
-- malformed v1 local-header DOS timestamp mismatch rejection
+- v1 reader acceptance of redundant local-header method and DOS timestamp mismatches while preserving CDR-authoritative metadata
 - malformed v1 local-header physical-sector span mismatch rejection
 - malformed v1 CI file-size alignment rejection
 - malformed v1 CI sector-padding rejection when post-comment padding bytes are nonzero
@@ -604,7 +623,7 @@ The crate tests pin:
 - malformed v2 install span rejection when freelist records do not fit
 - malformed v2 CDR alignment and install-padding rejection
 - malformed v2 EOCDR physical-sector-size rejection
-- malformed v2 EOCDR reserved-field and writer-flag rejection
+- malformed v2 EOCDR trie-cache placement and incomplete-flag rejection
 - malformed v2 EOF-buffer placement rejection
 
 Real P4K corpus validation is opt-in because retail archives are large

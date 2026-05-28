@@ -29,41 +29,40 @@ pub const EOCD_V2_VERSION: u16 = 2;
 /// All multi-byte fields are little-endian and densely packed (no
 /// padding). The record is always exactly [`EOCD_V2_SIZE`] bytes.
 ///
-/// The five `reserved_*` slots are always written as zero by the
-/// official writer.
+/// Offsets `0x08`, `0x20`, and `0x38` describe optional extension CDR
+/// sections. Offsets `0x50` and `0x58` point at the v2 filename trie cache.
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C, packed)]
 pub struct Eocd2Record {
     /// Total number of CDR entries in the archive.
-    pub num_file_entries: u64,
-    /// Reserved (writer leaves this zero).
-    pub reserved_08: u64,
+    pub number_of_entries: u64,
+    /// Additional expanded/subarchive CDR entries.
+    pub number_of_extension_entries: u64,
     /// Absolute byte offset of the first CDR entry (`m_nEndOfFileBlockOffset`).
-    pub end_of_file_block_offset: u64,
-    /// Total size of the CDR entry array in bytes (`0xCC * num_file_entries`).
-    pub cdr_size: u64,
-    /// Reserved.
-    pub reserved_20: u64,
-    /// Absolute offset of the name table
-    /// (== `end_of_file_block_offset + cdr_size`).
-    pub name_table_abs_offset: u64,
-    /// Total byte length of all entry names, including null terminators.
-    pub total_name_length: u64,
-    /// Reserved.
-    pub reserved_38: u64,
+    pub central_directory_record_offset: u64,
+    /// Total size of the base CDR entry array in bytes (`0xCC * number_of_entries`).
+    pub central_directory_record_size: u64,
+    /// Size of the optional extension CDR entry array.
+    pub central_directory_record_extension_size: u64,
+    /// Absolute offset of the name table.
+    pub central_directory_record_text_offset: u64,
+    /// Total byte length of normal entry names, including null terminators.
+    pub central_directory_record_text_size: u64,
+    /// Total byte length of extension entry names.
+    pub central_directory_record_extension_text_size: u64,
     /// Absolute byte offset just past the last byte of payload data.
-    pub end_of_payload: u64,
+    pub end_of_payload_offset: u64,
     /// Number of `cig_zip64::freelist_block` records (16 bytes each)
     /// stored in the install block.
     pub num_freelist_blocks: u64,
-    /// Reserved.
-    pub reserved_50: u64,
-    /// Reserved.
-    pub reserved_58: u64,
+    /// Absolute offset of the trie cache.
+    pub trie_cache_offset: u64,
+    /// Trie cache byte size.
+    pub trie_cache_size: u64,
     /// Sector size used when the archive was written.
     pub physical_sector_size: u64,
-    /// Always `1` in files written by the official tool.
-    pub flag_68: u8,
+    /// Status flags. Bit 0 marks an incomplete archive.
+    pub status_flags: u8,
     /// Two SHA-256 digests stored back-to-back (64 bytes total).
     /// The first 32 bytes are the manifest hash.
     pub manifest_sha256: [u8; 64],
@@ -93,29 +92,47 @@ mod tests {
         // offsets `v17 + 0xFFFFFFXX` (signed -0xAF + field offset).
         // These const checks pin every field to its decompiled offset.
         assert_eq!(std::mem::size_of::<Eocd2Record>(), EOCD_V2_SIZE);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, num_file_entries), 0x00);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, reserved_08), 0x08);
+        assert_eq!(std::mem::offset_of!(Eocd2Record, number_of_entries), 0x00);
         assert_eq!(
-            std::mem::offset_of!(Eocd2Record, end_of_file_block_offset),
+            std::mem::offset_of!(Eocd2Record, number_of_extension_entries),
+            0x08
+        );
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, central_directory_record_offset),
             0x10
         );
-        assert_eq!(std::mem::offset_of!(Eocd2Record, cdr_size), 0x18);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, reserved_20), 0x20);
         assert_eq!(
-            std::mem::offset_of!(Eocd2Record, name_table_abs_offset),
+            std::mem::offset_of!(Eocd2Record, central_directory_record_size),
+            0x18
+        );
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, central_directory_record_extension_size),
+            0x20
+        );
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, central_directory_record_text_offset),
             0x28
         );
-        assert_eq!(std::mem::offset_of!(Eocd2Record, total_name_length), 0x30);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, reserved_38), 0x38);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, end_of_payload), 0x40);
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, central_directory_record_text_size),
+            0x30
+        );
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, central_directory_record_extension_text_size),
+            0x38
+        );
+        assert_eq!(
+            std::mem::offset_of!(Eocd2Record, end_of_payload_offset),
+            0x40
+        );
         assert_eq!(std::mem::offset_of!(Eocd2Record, num_freelist_blocks), 0x48);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, reserved_50), 0x50);
-        assert_eq!(std::mem::offset_of!(Eocd2Record, reserved_58), 0x58);
+        assert_eq!(std::mem::offset_of!(Eocd2Record, trie_cache_offset), 0x50);
+        assert_eq!(std::mem::offset_of!(Eocd2Record, trie_cache_size), 0x58);
         assert_eq!(
             std::mem::offset_of!(Eocd2Record, physical_sector_size),
             0x60
         );
-        assert_eq!(std::mem::offset_of!(Eocd2Record, flag_68), 0x68);
+        assert_eq!(std::mem::offset_of!(Eocd2Record, status_flags), 0x68);
         assert_eq!(std::mem::offset_of!(Eocd2Record, manifest_sha256), 0x69);
         assert_eq!(std::mem::offset_of!(Eocd2Record, version), 0xA9);
         assert_eq!(std::mem::offset_of!(Eocd2Record, magic), 0xAB);

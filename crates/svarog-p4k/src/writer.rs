@@ -15,6 +15,7 @@
 //! [EOCDR: 0xAF bytes ending in version=2, magic="JiJi"]
 //! ```
 
+use std::collections::HashMap;
 #[cfg(feature = "parallel")]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -1289,6 +1290,139 @@ where
     finish_temp_output(temp_output, output, result)
 }
 
+/// Rebuild only the v2 metadata tail of an existing archive in place.
+///
+/// Payload bytes are left untouched. This is useful when the data area is
+/// already valid but the install block, CDR, name table, trie cache, or EOCDR
+/// need to be regenerated with the current writer model.
+pub fn rewrite_v2_tail_in_place<P: AsRef<Path>>(path: P) -> Result<P4kWriteStats> {
+    let path = path.as_ref();
+    let (temp_tail, mut temp_file, stats) = {
+        let archive = P4kArchive::open(path)?;
+        if archive.version() != P4kVersion::V2 {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archive is not P4K v2",
+            )));
+        }
+
+        let layout = archive.layout().clone();
+        let sector_size = layout.physical_sector_size.ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 archive is missing physical sector size",
+            ))
+        })?;
+        let end_of_payload = layout.end_of_payload.ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 archive is missing end_of_payload",
+            ))
+        })?;
+        let options = P4kWriterOptions {
+            sector_size,
+            manifest_sha256: layout.manifest_sha256.unwrap_or([0; 64]),
+            ..Default::default()
+        };
+        validate_options(&options)?;
+
+        let raw_entries = archive.raw_entries()?;
+        let mut entries = Vec::with_capacity(raw_entries.len());
+        for raw in raw_entries {
+            if raw.payload_len != 0 && raw.payload_offset % sector_size != 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "payload offset {} for {} is not aligned to sector size {}",
+                        raw.payload_offset, raw.name, sector_size
+                    ),
+                )));
+            }
+            entries.push(V2EntryMeta {
+                name: raw.name,
+                offset_to_file_data: if raw.payload_len == 0 {
+                    0
+                } else {
+                    raw.payload_offset
+                },
+                compressed_size: raw.payload_len,
+                uncompressed_size: raw.uncompressed_size,
+                compression_method: raw.compression_method,
+                crc32: raw.crc32,
+                last_mod_file_time: raw.last_mod_file_time,
+                last_mod_file_date: raw.last_mod_file_date,
+                encrypted: raw.is_encrypted,
+                signature: raw.signature,
+                sha256: raw.sha256,
+                bytes_already_written: raw.bytes_already_written,
+            });
+        }
+
+        let freelist_blocks: Vec<_> = archive
+            .freelist_blocks()
+            .iter()
+            .map(|block| FreelistBlock {
+                offset: block.offset,
+                size: block.size,
+            })
+            .collect();
+
+        let (temp_tail, file) = create_temp_rewrite_tail_file(path)?;
+        let result = (|| {
+            let mut writer = BufWriter::with_capacity(COPY_BUFFER_SIZE, file);
+            writer.seek(SeekFrom::Start(end_of_payload))?;
+            let stats = write_v2_tail(
+                &mut writer,
+                &entries,
+                &freelist_blocks,
+                end_of_payload,
+                &options,
+                false,
+            )?;
+            writer.flush()?;
+            let file = writer
+                .into_inner()
+                .map_err(|err| Error::Io(err.into_error()))?;
+            Ok((file, stats))
+        })();
+
+        match result {
+            Ok((file, stats)) => (temp_tail, file, stats),
+            Err(err) => {
+                let _ = fs::remove_file(&temp_tail);
+                return Err(err);
+            }
+        }
+    };
+
+    let tail_start = stats.payload_end;
+    let tail_len = stats.file_size.checked_sub(tail_start).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "rewritten v2 tail has invalid size",
+        ))
+    })?;
+
+    let result = (|| {
+        temp_file.seek(SeekFrom::Start(tail_start))?;
+        let mut output = OpenOptions::new().read(true).write(true).open(path)?;
+        output.set_len(tail_start)?;
+        output.seek(SeekFrom::Start(tail_start))?;
+        let mut writer = BufWriter::with_capacity(COPY_BUFFER_SIZE, output);
+        copy_exact_prefix(&mut temp_file, &mut writer, tail_len)?;
+        writer.flush()?;
+        let output = writer
+            .into_inner()
+            .map_err(|err| Error::Io(err.into_error()))?;
+        output.set_len(stats.file_size)?;
+        output.sync_data()?;
+        Ok(stats)
+    })();
+
+    let _ = fs::remove_file(&temp_tail);
+    result
+}
+
 fn max_v1_payload_end(raw_entries: &[crate::archive::P4kRawEntryRef<'_>]) -> Result<u64> {
     let mut max_payload_end = 0u64;
     for raw in raw_entries {
@@ -1395,6 +1529,47 @@ fn create_temp_output_file(output: &Path) -> Result<(PathBuf, File)> {
     Err(Error::Io(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "could not create unique temporary output file",
+    )))
+}
+
+fn create_temp_rewrite_tail_file(output: &Path) -> Result<(PathBuf, File)> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = output.file_name().ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "output path must include a file name",
+        ))
+    })?;
+    let file_name = file_name.to_string_lossy();
+
+    for _ in 0..1024 {
+        let counter = TEMP_PAYLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = parent.join(format!(
+            ".{file_name}.svarog-p4k-tail-{}-{nanos}-{counter}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(Error::Io(err)),
+        }
+    }
+
+    Err(Error::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create unique temporary tail file",
     )))
 }
 
@@ -1549,6 +1724,205 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
+struct TrieNode {
+    content: Vec<u8>,
+    value_index: u64,
+    children: Vec<usize>,
+}
+
+impl TrieNode {
+    fn root() -> Self {
+        Self {
+            content: Vec::new(),
+            value_index: u64::MAX,
+            children: Vec::new(),
+        }
+    }
+
+    fn leaf(content: &[u8], value_index: u64) -> Self {
+        Self {
+            content: content.to_vec(),
+            value_index,
+            children: Vec::new(),
+        }
+    }
+}
+
+fn build_v2_trie_cache(entries: &[V2EntryMeta<'_>]) -> Result<Vec<u8>> {
+    let mut nodes = vec![TrieNode::root()];
+    let mut values = Vec::<u32>::new();
+    let mut value_indices = HashMap::<Vec<u8>, usize>::with_capacity(entries.len());
+
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let normalized = normalize_p4k_path(entry.name, true).into_bytes();
+        match value_indices.get(&normalized).copied() {
+            Some(index) => {
+                values[index] = usize_to_u32(entry_index, "trie value entry index")?;
+            }
+            None => {
+                let index = values.len();
+                value_indices.insert(normalized.clone(), index);
+                values.push(usize_to_u32(entry_index, "trie value entry index")?);
+                insert_trie_node(
+                    &mut nodes,
+                    0,
+                    &normalized,
+                    usize_to_u64(index, "trie value index")?,
+                )?;
+            }
+        }
+    }
+
+    let mut trie_storage = Vec::new();
+    serialize_trie_node(0, &nodes, &mut trie_storage)?;
+    let trie_storage_size = usize_to_u32(trie_storage.len(), "trie storage size")?;
+    let value_storage_size = values
+        .len()
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trie value storage size overflow",
+            ))
+        })
+        .and_then(|value| usize_to_u32(value, "trie value storage size"))?;
+
+    let folder_trie_root = folder_trie_root_bytes();
+    let mut cache = Vec::with_capacity(
+        16 + trie_storage.len()
+            + values.len() * std::mem::size_of::<u32>()
+            + folder_trie_root.len(),
+    );
+    cache.extend_from_slice(&trie_storage_size.to_le_bytes());
+    cache.extend_from_slice(&value_storage_size.to_le_bytes());
+    cache.extend_from_slice(
+        &usize_to_u32(folder_trie_root.len(), "folder trie storage size")?.to_le_bytes(),
+    );
+    cache.extend_from_slice(&0u32.to_le_bytes());
+    cache.extend_from_slice(&trie_storage);
+    for value in values {
+        cache.extend_from_slice(&value.to_le_bytes());
+    }
+    cache.extend_from_slice(&folder_trie_root);
+    Ok(cache)
+}
+
+fn insert_trie_node(
+    nodes: &mut Vec<TrieNode>,
+    node_index: usize,
+    key: &[u8],
+    value_index: u64,
+) -> Result<()> {
+    if key.is_empty() {
+        nodes[node_index].value_index = value_index;
+        return Ok(());
+    }
+
+    let child_count = nodes[node_index].children.len();
+    for position in 0..child_count {
+        let child_index = nodes[node_index].children[position];
+        let common = common_prefix_len(&nodes[child_index].content, key);
+        if common == 0 {
+            continue;
+        }
+
+        if common == nodes[child_index].content.len() {
+            return insert_trie_node(nodes, child_index, &key[common..], value_index);
+        }
+
+        let old_suffix = nodes[child_index].content[common..].to_vec();
+        let old_value_index = nodes[child_index].value_index;
+        let old_children = std::mem::take(&mut nodes[child_index].children);
+        let old_child_index = nodes.len();
+        nodes.push(TrieNode {
+            content: old_suffix,
+            value_index: old_value_index,
+            children: old_children,
+        });
+
+        nodes[child_index].content.truncate(common);
+        nodes[child_index].value_index = if common == key.len() {
+            value_index
+        } else {
+            u64::MAX
+        };
+        nodes[child_index].children = vec![old_child_index];
+
+        if common < key.len() {
+            if key.len() - common > u16::MAX as usize {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "trie node content length exceeds u16",
+                )));
+            }
+            let new_child_index = nodes.len();
+            nodes.push(TrieNode::leaf(&key[common..], value_index));
+            nodes[child_index].children.push(new_child_index);
+        }
+        return Ok(());
+    }
+
+    if key.len() > u16::MAX as usize {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "trie node content length exceeds u16",
+        )));
+    }
+    let child_index = nodes.len();
+    nodes.push(TrieNode::leaf(key, value_index));
+    nodes[node_index].children.push(child_index);
+    Ok(())
+}
+
+fn common_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn serialize_trie_node(index: usize, nodes: &[TrieNode], output: &mut Vec<u8>) -> Result<u32> {
+    let offset = usize_to_u32(output.len(), "trie node offset")?;
+    let node = &nodes[index];
+    if node.content.len() > u16::MAX as usize {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "trie node content length exceeds u16",
+        )));
+    }
+
+    output.extend_from_slice(&node.value_index.to_le_bytes());
+    output.extend_from_slice(&u32::MAX.to_le_bytes());
+    output.extend_from_slice(&u32::MAX.to_le_bytes());
+    output.extend_from_slice(&(node.content.len() as u16).to_le_bytes());
+    output.extend_from_slice(&[0; 6]);
+    output.extend_from_slice(&node.content);
+
+    let mut previous_child_offset = None;
+    for child in &node.children {
+        let child_offset = serialize_trie_node(*child, nodes, output)?;
+        if let Some(previous) = previous_child_offset {
+            patch_u32(output, previous as usize + 12, child_offset);
+        } else {
+            patch_u32(output, offset as usize + 8, child_offset);
+        }
+        previous_child_offset = Some(child_offset);
+    }
+
+    Ok(offset)
+}
+
+fn patch_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn folder_trie_root_bytes() -> [u8; 16] {
+    let mut root = [0u8; 16];
+    root[4..12].copy_from_slice(&u64::MAX.to_le_bytes());
+    root
+}
+
 fn write_v2_tail<W: Write + Seek>(
     writer: &mut W,
     entries: &[V2EntryMeta<'_>],
@@ -1658,28 +2032,40 @@ fn write_v2_tail<W: Write + Seek>(
         writer.write_all(entry.name.as_bytes())?;
         writer.write_all(&[0])?;
     }
+    let trie_cache = build_v2_trie_cache(entries)?;
+    let trie_cache_offset = name_table_abs_offset
+        .checked_add(name_table_len)
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 trie cache offset overflow",
+            ))
+        })?;
+    writer.write_all(&trie_cache)?;
+    let trie_cache_size = usize_to_u64(trie_cache.len(), "trie cache size")?;
 
     let eocdr = Eocd2Record {
-        num_file_entries: usize_to_u64(entries.len(), "entry count")?,
-        reserved_08: 0,
-        end_of_file_block_offset: cdr_offset,
-        cdr_size,
-        reserved_20: 0,
-        name_table_abs_offset,
-        total_name_length: name_table_len,
-        reserved_38: 0,
-        end_of_payload,
+        number_of_entries: usize_to_u64(entries.len(), "entry count")?,
+        number_of_extension_entries: 0,
+        central_directory_record_offset: cdr_offset,
+        central_directory_record_size: cdr_size,
+        central_directory_record_extension_size: 0,
+        central_directory_record_text_offset: name_table_abs_offset,
+        central_directory_record_text_size: name_table_len,
+        central_directory_record_extension_text_size: 0,
+        end_of_payload_offset: end_of_payload,
         num_freelist_blocks: usize_to_u64(freelist_blocks.len(), "freelist block count")?,
-        reserved_50: 0,
-        reserved_58: 0,
+        trie_cache_offset,
+        trie_cache_size,
         physical_sector_size: options.sector_size,
-        flag_68: 1,
+        status_flags: 0,
         manifest_sha256: options.manifest_sha256,
         version: EOCD_V2_VERSION,
         magic: EOCD_V2_MAGIC,
     };
     let eof_used = cdr_size
         .checked_add(name_table_len)
+        .and_then(|value| value.checked_add(trie_cache_size))
         .and_then(|value| value.checked_add(EOCD_V2_SIZE as u64))
         .ok_or_else(|| {
             Error::Io(io::Error::new(
@@ -2731,6 +3117,15 @@ fn usize_to_u64(value: usize, what: &'static str) -> Result<u64> {
         Error::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("{what} overflows u64"),
+        ))
+    })
+}
+
+fn usize_to_u32(value: usize, what: &'static str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{what} overflows u32"),
         ))
     })
 }

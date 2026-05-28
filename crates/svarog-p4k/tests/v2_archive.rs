@@ -62,7 +62,7 @@ fn p4k_crc32(data: &[u8]) -> u32 {
 ///   [install block: u64 bytes_already_written_to_disk per entry]
 ///   [zero padding to 64 KiB CDR boundary]
 ///   [CDR: N * 0xCC bytes]
-///   [name table: total_name_length bytes]
+///   [name table: central_directory_record_text_size bytes]
 ///   [zero padding to place EOCDR at end of aligned EOF buffer]
 ///   [EOCDR: 0xAF bytes including trailing "JiJi" magic]
 ///   [optional null padding]
@@ -94,7 +94,7 @@ fn build_v2_archive(entries: &[V2EntrySpec], trailing_padding: usize) -> Vec<u8>
         name_table.extend_from_slice(e.name.as_bytes());
         name_table.push(0); // null terminator
     }
-    let total_name_length = name_table.len() as u64;
+    let central_directory_record_text_size = name_table.len() as u64;
 
     // 3. Build the CDR.
     let mut cdr: Vec<u8> = Vec::with_capacity(entries.len() * CDR_V2_ENTRY_SIZE);
@@ -120,7 +120,7 @@ fn build_v2_archive(entries: &[V2EntrySpec], trailing_padding: usize) -> Vec<u8>
     // 4. Assemble the file. The install block follows payloads.
     let mut file: Vec<u8> = Vec::new();
     file.extend_from_slice(&payload);
-    let end_of_payload = file.len() as u64;
+    let end_of_payload_offset = file.len() as u64;
     for e in entries {
         file.extend_from_slice(&(e.payload.len() as u64).to_le_bytes());
     }
@@ -133,20 +133,20 @@ fn build_v2_archive(entries: &[V2EntrySpec], trailing_padding: usize) -> Vec<u8>
     // 5. Build and append the EOCDR.
     let mut eocdr_bytes = [0u8; EOCD_V2_SIZE];
     let eocdr = Eocd2Record {
-        num_file_entries: entries.len() as u64,
-        reserved_08: 0,
-        end_of_file_block_offset: cdr_start,
-        cdr_size: cdr.len() as u64,
-        reserved_20: 0,
-        name_table_abs_offset: name_table_start,
-        total_name_length,
-        reserved_38: 0,
-        end_of_payload,
+        number_of_entries: entries.len() as u64,
+        number_of_extension_entries: 0,
+        central_directory_record_offset: cdr_start,
+        central_directory_record_size: cdr.len() as u64,
+        central_directory_record_extension_size: 0,
+        central_directory_record_text_offset: name_table_start,
+        central_directory_record_text_size,
+        central_directory_record_extension_text_size: 0,
+        end_of_payload_offset,
         num_freelist_blocks: 0,
-        reserved_50: 0,
-        reserved_58: 0,
+        trie_cache_offset: 0,
+        trie_cache_size: 0,
         physical_sector_size: SECTOR_SIZE,
-        flag_68: 1,
+        status_flags: 0,
         manifest_sha256: [0u8; 64],
         version: EOCD_V2_VERSION,
         magic: EOCD_V2_MAGIC,
@@ -173,10 +173,10 @@ fn insert_v2_name_table_slack_before_entry(
     let eocdr_start = file.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&file[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
-    let name_table_start = eocdr.name_table_abs_offset as usize;
-    let name_table_end = name_table_start + eocdr.total_name_length as usize;
-    assert!(entry_index < eocdr.num_file_entries as usize);
+    let cdr_start = eocdr.central_directory_record_offset as usize;
+    let name_table_start = eocdr.central_directory_record_text_offset as usize;
+    let name_table_end = name_table_start + eocdr.central_directory_record_text_size as usize;
+    assert!(entry_index < eocdr.number_of_entries as usize);
     assert!(name_table_end + slack.len() <= eocdr_start);
 
     let target_entry = cdr_start + entry_index * CDR_V2_ENTRY_SIZE;
@@ -189,7 +189,7 @@ fn insert_v2_name_table_slack_before_entry(
     file.splice(insert_at..insert_at, slack.iter().copied());
     file.drain(eocdr_start..eocdr_start + slack.len());
 
-    for index in 0..eocdr.num_file_entries as usize {
+    for index in 0..eocdr.number_of_entries as usize {
         let entry = cdr_start + index * CDR_V2_ENTRY_SIZE;
         let range = entry + 0x22..entry + 0x2A;
         let old = u64::from_le_bytes(file[range.clone()].try_into().unwrap());
@@ -197,8 +197,10 @@ fn insert_v2_name_table_slack_before_entry(
             file[range].copy_from_slice(&(old + slack.len() as u64).to_le_bytes());
         }
     }
-    let total_name_length = eocdr.total_name_length + slack.len() as u64;
-    file[eocdr_start + 0x30..eocdr_start + 0x38].copy_from_slice(&total_name_length.to_le_bytes());
+    let central_directory_record_text_size =
+        eocdr.central_directory_record_text_size + slack.len() as u64;
+    file[eocdr_start + 0x30..eocdr_start + 0x38]
+        .copy_from_slice(&central_directory_record_text_size.to_le_bytes());
     file
 }
 
@@ -478,7 +480,7 @@ fn entry_crc_mismatch_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     bytes[cdr_start + 0xAC..cdr_start + 0xCC]
         .copy_from_slice(&sha256_array(b"crc checked payload"));
     fs::write(&tmp, bytes).unwrap();
@@ -566,20 +568,35 @@ fn writer_builds_dump_verified_v2_layout() {
     );
     let name_table_end =
         stats.cdr_offset as usize + stats.cdr_size as usize + stats.name_table_size as usize;
-    assert!(bytes[name_table_end..eocdr_start]
+    let eocdr = <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(
+        &bytes[eocdr_start..eocdr_start + EOCD_V2_SIZE],
+    )
+    .unwrap();
+    assert_eq!(eocdr.trie_cache_offset as usize, name_table_end);
+    assert!(eocdr.trie_cache_size >= 16 + 24 + 4 + 16);
+    let trie_cache =
+        &bytes[name_table_end..name_table_end + usize::try_from(eocdr.trie_cache_size).unwrap()];
+    assert!(u32::from_le_bytes(trie_cache[0..4].try_into().unwrap()) >= 24);
+    assert_eq!(u32::from_le_bytes(trie_cache[4..8].try_into().unwrap()), 4);
+    assert_eq!(
+        u32::from_le_bytes(trie_cache[8..12].try_into().unwrap()),
+        16
+    );
+    assert_eq!(
+        u32::from_le_bytes(trie_cache[12..16].try_into().unwrap()),
+        0
+    );
+    let trie_cache_end = name_table_end + usize::try_from(eocdr.trie_cache_size).unwrap();
+    assert!(bytes[trie_cache_end..eocdr_start]
         .iter()
         .all(|byte| *byte == 0));
 
     // The install block starts at the sector-aligned payload end and
     // stores bytes_already_written_to_disk for each entry.
-    let eocdr = <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(
-        &bytes[eocdr_start..eocdr_start + EOCD_V2_SIZE],
-    )
-    .unwrap();
-    let end_of_payload = eocdr.end_of_payload as usize;
+    let end_of_payload_offset = eocdr.end_of_payload_offset as usize;
     assert_eq!(
         u64::from_le_bytes(
-            bytes[end_of_payload..end_of_payload + 8]
+            bytes[end_of_payload_offset..end_of_payload_offset + 8]
                 .try_into()
                 .unwrap()
         ),
@@ -599,11 +616,14 @@ fn writer_builds_dump_verified_v2_layout() {
         Some(stats.cdr_offset + stats.cdr_size)
     );
     assert_eq!(layout.name_table_size, stats.name_table_size);
-    assert_eq!(layout.end_of_payload, Some(eocdr.end_of_payload));
-    assert_eq!(layout.install_block_offset, Some(eocdr.end_of_payload));
+    assert_eq!(layout.end_of_payload, Some(eocdr.end_of_payload_offset));
+    assert_eq!(
+        layout.install_block_offset,
+        Some(eocdr.end_of_payload_offset)
+    );
     assert_eq!(
         layout.install_block_size,
-        Some(stats.cdr_offset - eocdr.end_of_payload)
+        Some(stats.cdr_offset - eocdr.end_of_payload_offset)
     );
     assert_eq!(layout.eocd_offset, eocdr_start as u64);
     assert_eq!(layout.manifest_sha256, Some([0u8; 64]));
@@ -818,10 +838,13 @@ fn writer_v2_eocdr_fields_match_dump_offsets() {
     assert_eq!(field_u64(0x38), 0);
     assert_eq!(field_u64(0x40), stats.payload_end);
     assert_eq!(field_u64(0x48), 0);
-    assert_eq!(field_u64(0x50), 0);
-    assert_eq!(field_u64(0x58), 0);
+    assert_eq!(
+        field_u64(0x50),
+        stats.cdr_offset + stats.cdr_size + stats.name_table_size
+    );
+    assert!(field_u64(0x58) >= 16 + 24 + 2 * 4 + 16);
     assert_eq!(field_u64(0x60), options.sector_size);
-    assert_eq!(eocdr[0x68], 1);
+    assert_eq!(eocdr[0x68], 0);
     assert_eq!(&eocdr[0x69..0xA9], &options.manifest_sha256);
     assert_eq!(
         u16::from_le_bytes(eocdr[0xA9..0xAB].try_into().unwrap()),
@@ -941,10 +964,17 @@ fn writer_builds_empty_v2_initial_layout_like_initialize_pak_file_v2() {
     assert_eq!(bytes.len(), SECTOR_SIZE as usize);
 
     let eocdr_start = SECTOR_SIZE as usize - EOCD_V2_SIZE;
-    assert!(bytes[..eocdr_start].iter().all(|byte| *byte == 0));
     let eocdr = &bytes[eocdr_start..];
     let field_u64 =
         |offset: usize| u64::from_le_bytes(eocdr[offset..offset + 8].try_into().unwrap());
+    let trie_cache_size = 16 + 24 + 16;
+    assert_eq!(
+        &bytes[0..16],
+        &[24, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0]
+    );
+    assert!(bytes[trie_cache_size..eocdr_start]
+        .iter()
+        .all(|byte| *byte == 0));
     assert_eq!(field_u64(0x00), 0);
     assert_eq!(field_u64(0x08), 0);
     assert_eq!(field_u64(0x10), 0);
@@ -956,9 +986,9 @@ fn writer_builds_empty_v2_initial_layout_like_initialize_pak_file_v2() {
     assert_eq!(field_u64(0x40), 0);
     assert_eq!(field_u64(0x48), 0);
     assert_eq!(field_u64(0x50), 0);
-    assert_eq!(field_u64(0x58), 0);
+    assert_eq!(field_u64(0x58), trie_cache_size as u64);
     assert_eq!(field_u64(0x60), SECTOR_SIZE);
-    assert_eq!(eocdr[0x68], 1);
+    assert_eq!(eocdr[0x68], 0);
     assert_eq!(&eocdr[0x69..0xA9], &options.manifest_sha256);
     assert_eq!(
         u16::from_le_bytes(eocdr[0xA9..0xAB].try_into().unwrap()),
@@ -2678,12 +2708,13 @@ fn malformed_v1_cdr_trailing_bytes_are_rejected() {
     bytes.insert(eocd64_offset, 0xEE);
     let new_eocd64_offset = eocd64_offset + 1;
     let cdr_size_offset = new_eocd64_offset + 40;
-    let cdr_size = u64::from_le_bytes(
+    let central_directory_record_size = u64::from_le_bytes(
         bytes[cdr_size_offset..cdr_size_offset + 8]
             .try_into()
             .unwrap(),
     );
-    bytes[cdr_size_offset..cdr_size_offset + 8].copy_from_slice(&(cdr_size + 1).to_le_bytes());
+    bytes[cdr_size_offset..cdr_size_offset + 8]
+        .copy_from_slice(&(central_directory_record_size + 1).to_le_bytes());
 
     let locator_offset = find_zip64_locator(&bytes);
     bytes[locator_offset + 8..locator_offset + 16]
@@ -3021,12 +3052,12 @@ fn malformed_v1_overflowing_freelist_block_is_rejected() {
 }
 
 #[test]
-fn reader_rejects_v1_local_header_metadata_mismatch() {
-    let tmp = tempfile_path("svarog_p4k_bad_v1_local_header_metadata.p4k");
+fn reader_accepts_v1_local_header_redundant_method_mismatch() {
+    let tmp = tempfile_path("svarog_p4k_v1_local_header_method_mismatch.p4k");
     let signature = [0u8; 128];
     let sha256 = sha256_array(b"payload");
     let mut bytes = build_zip64_v1_archive_with_p4k_metadata(
-        "bad-local-header.bin",
+        "local-header-method.bin",
         b"payload",
         signature,
         sha256,
@@ -3038,22 +3069,21 @@ fn reader_rejects_v1_local_header_metadata_mismatch() {
     fs::write(&tmp, bytes).unwrap();
 
     let archive = P4kArchive::open(&tmp).unwrap();
-    let err = archive.read(&archive.get(0).unwrap()).unwrap_err();
-    assert!(
-        err.to_string().contains("local header compression method"),
-        "expected v1 local-header metadata mismatch, got {err}"
-    );
+    let entry = archive.get(0).unwrap();
+    assert_eq!(entry.compression_method, CompressionMethod::Store);
+    assert_eq!(archive.read(&entry).unwrap(), b"payload");
+    archive.verify_entry_integrity(&entry).unwrap();
 
     let _ = fs::remove_file(&tmp);
 }
 
 #[test]
-fn reader_rejects_v1_local_header_timestamp_mismatch() {
-    let tmp = tempfile_path("svarog_p4k_bad_v1_local_header_timestamp.p4k");
+fn reader_accepts_v1_local_header_redundant_timestamp_mismatch() {
+    let tmp = tempfile_path("svarog_p4k_v1_local_header_timestamp_mismatch.p4k");
     let signature = [0u8; 128];
     let sha256 = sha256_array(b"payload");
     let mut bytes = build_zip64_v1_archive_with_p4k_metadata(
-        "bad-local-time.bin",
+        "local-header-time.bin",
         b"payload",
         signature,
         sha256,
@@ -3065,11 +3095,11 @@ fn reader_rejects_v1_local_header_timestamp_mismatch() {
     fs::write(&tmp, bytes).unwrap();
 
     let archive = P4kArchive::open(&tmp).unwrap();
-    let err = archive.read(&archive.get(0).unwrap()).unwrap_err();
-    assert!(
-        err.to_string().contains("DOS timestamp"),
-        "expected v1 local-header timestamp mismatch, got {err}"
-    );
+    let entry = archive.get(0).unwrap();
+    assert_eq!(entry.last_mod_file_time, 0x1234);
+    assert_eq!(entry.last_mod_file_date, 0x5678);
+    assert_eq!(archive.read(&entry).unwrap(), b"payload");
+    archive.verify_entry_integrity(&entry).unwrap();
 
     let _ = fs::remove_file(&tmp);
 }
@@ -3094,9 +3124,63 @@ fn reader_rejects_v1_local_header_name_length_mismatch() {
     let archive = P4kArchive::open(&tmp).unwrap();
     let err = archive.read(&archive.get(0).unwrap()).unwrap_err();
     assert!(
-        err.to_string().contains("file_name_length"),
+        err.to_string().contains("local header span") || err.to_string().contains("file name"),
         "expected v1 local-header file-name length mismatch, got {err}"
     );
+
+    let _ = fs::remove_file(&tmp);
+}
+
+#[test]
+fn reader_accepts_v1_local_header_name_with_unnormalized_separators() {
+    let tmp = tempfile_path("svarog_p4k_v1_local_header_unnormalized_name.p4k");
+    let signature = [0u8; 128];
+    let sha256 = sha256_array(b"payload");
+    let mut bytes = build_zip64_v1_archive_with_p4k_metadata(
+        "Data/local-name.bin",
+        b"payload",
+        signature,
+        sha256,
+        0,
+        0,
+        0,
+    );
+    let local_name_start = 0x1E;
+    bytes[local_name_start + 4] = b'\\';
+    fs::write(&tmp, bytes).unwrap();
+
+    let archive = P4kArchive::open(&tmp).unwrap();
+    let entry = archive.find("Data/local-name.bin").unwrap();
+    assert_eq!(archive.read(&entry).unwrap(), b"payload");
+    archive.verify_entry_integrity(&entry).unwrap();
+
+    let _ = fs::remove_file(&tmp);
+}
+
+#[test]
+fn reader_accepts_v1_local_header_name_with_different_case() {
+    let tmp = tempfile_path("svarog_p4k_v1_local_header_case_name.p4k");
+    let signature = [0u8; 128];
+    let sha256 = sha256_array(b"payload");
+    let mut bytes = build_zip64_v1_archive_with_p4k_metadata(
+        "Data/Objects/Ships/Cleaver/file.bin",
+        b"payload",
+        signature,
+        sha256,
+        0,
+        0,
+        0,
+    );
+    let local_name_start = 0x1E;
+    let local_name = b"Data\\Objects\\Ships\\cleaver\\file.bin";
+    bytes[local_name_start..local_name_start + local_name.len()].copy_from_slice(local_name);
+    fs::write(&tmp, bytes).unwrap();
+
+    let archive = P4kArchive::open(&tmp).unwrap();
+    let entry = archive.find("Data/Objects/Ships/Cleaver/file.bin").unwrap();
+    assert_eq!(entry.name, "Data/Objects/Ships/Cleaver/file.bin");
+    assert_eq!(archive.read(&entry).unwrap(), b"payload");
+    archive.verify_entry_integrity(&entry).unwrap();
 
     let _ = fs::remove_file(&tmp);
 }
@@ -3115,7 +3199,7 @@ fn reader_rejects_v1_local_header_name_bytes_mismatch() {
         0,
         0,
     );
-    bytes[0x1E] = b'B';
+    bytes[0x1E] = b'x';
     fs::write(&tmp, bytes).unwrap();
 
     let archive = P4kArchive::open(&tmp).unwrap();
@@ -3201,7 +3285,7 @@ fn malformed_v2_install_progress_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let install_start = eocdr.end_of_payload as usize;
+    let install_start = eocdr.end_of_payload_offset as usize;
     bytes[install_start..install_start + 8].copy_from_slice(&8u64.to_le_bytes());
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_install_progress.p4k");
@@ -3230,7 +3314,7 @@ fn malformed_v2_freelist_install_span_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset;
+    let cdr_start = eocdr.central_directory_record_offset;
     bytes[eocdr_start + 0x40..eocdr_start + 0x48].copy_from_slice(&(cdr_start - 8).to_le_bytes());
     bytes[eocdr_start + 0x48..eocdr_start + 0x50].copy_from_slice(&1u64.to_le_bytes());
 
@@ -3260,7 +3344,7 @@ fn malformed_v2_zero_freelist_block_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let install_start = eocdr.end_of_payload as usize;
+    let install_start = eocdr.end_of_payload_offset as usize;
     bytes[eocdr_start + 0x48..eocdr_start + 0x50].copy_from_slice(&1u64.to_le_bytes());
     bytes[install_start + 8..install_start + 16].copy_from_slice(&0x100u64.to_le_bytes());
     bytes[install_start + 16..install_start + 24].copy_from_slice(&0u64.to_le_bytes());
@@ -3291,7 +3375,7 @@ fn malformed_v2_overflowing_freelist_block_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let install_start = eocdr.end_of_payload as usize;
+    let install_start = eocdr.end_of_payload_offset as usize;
     bytes[eocdr_start + 0x48..eocdr_start + 0x50].copy_from_slice(&1u64.to_le_bytes());
     bytes[install_start + 8..install_start + 16].copy_from_slice(&u64::MAX.to_le_bytes());
     bytes[install_start + 16..install_start + 24].copy_from_slice(&2u64.to_le_bytes());
@@ -3309,41 +3393,34 @@ fn malformed_v2_overflowing_freelist_block_is_rejected() {
 }
 
 #[test]
-fn malformed_v2_eocdr_reserved_field_is_rejected() {
-    for (field_name, offset) in [
-        ("reserved_08", 0x08),
-        ("reserved_20", 0x20),
-        ("reserved_38", 0x38),
-        ("reserved_50", 0x50),
-        ("reserved_58", 0x58),
-    ] {
-        let entries = vec![V2EntrySpec {
-            name: "bad-v2-reserved.bin".to_string(),
-            payload: b"payload".to_vec(),
-            uncompressed_size: 7,
-            compression_method: CM_STORE,
-            crc32: p4k_crc32(b"payload"),
-            encrypted: false,
-        }];
-        let mut bytes = build_v2_archive(&entries, 0);
-        let eocdr_start = bytes.len() - EOCD_V2_SIZE;
-        bytes[eocdr_start + offset..eocdr_start + offset + 8].copy_from_slice(&1u64.to_le_bytes());
+fn malformed_v2_trie_cache_offset_is_rejected() {
+    let entries = vec![V2EntrySpec {
+        name: "bad-v2-trie-cache.bin".to_string(),
+        payload: b"payload".to_vec(),
+        uncompressed_size: 7,
+        compression_method: CM_STORE,
+        crc32: p4k_crc32(b"payload"),
+        encrypted: false,
+    }];
+    let mut bytes = build_v2_archive(&entries, 0);
+    let eocdr_start = bytes.len() - EOCD_V2_SIZE;
+    bytes[eocdr_start + 0x50..eocdr_start + 0x58].copy_from_slice(&1u64.to_le_bytes());
+    bytes[eocdr_start + 0x58..eocdr_start + 0x60].copy_from_slice(&16u64.to_le_bytes());
 
-        let tmp = tempfile_path(&format!("svarog_p4k_bad_v2_eocdr_{field_name}.p4k"));
-        fs::write(&tmp, bytes).unwrap();
+    let tmp = tempfile_path("svarog_p4k_bad_v2_trie_cache_offset.p4k");
+    fs::write(&tmp, bytes).unwrap();
 
-        let err = P4kArchive::open(&tmp).unwrap_err();
-        assert!(
-            err.to_string().contains(field_name),
-            "expected {field_name} rejection, got {err}"
-        );
+    let err = P4kArchive::open(&tmp).unwrap_err();
+    assert!(
+        err.to_string().contains("trie cache offset"),
+        "expected trie-cache-offset rejection, got {err}"
+    );
 
-        let _ = fs::remove_file(&tmp);
-    }
+    let _ = fs::remove_file(&tmp);
 }
 
 #[test]
-fn malformed_v2_eocdr_writer_flag_is_rejected() {
+fn malformed_v2_eocdr_incomplete_flag_is_rejected() {
     let entries = vec![V2EntrySpec {
         name: "bad-v2-flag.bin".to_string(),
         payload: b"payload".to_vec(),
@@ -3354,15 +3431,15 @@ fn malformed_v2_eocdr_writer_flag_is_rejected() {
     }];
     let mut bytes = build_v2_archive(&entries, 0);
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
-    bytes[eocdr_start + 0x68] = 0;
+    bytes[eocdr_start + 0x68] = 1;
 
-    let tmp = tempfile_path("svarog_p4k_bad_v2_eocdr_flag.p4k");
+    let tmp = tempfile_path("svarog_p4k_bad_v2_eocdr_incomplete_flag.p4k");
     fs::write(&tmp, bytes).unwrap();
 
     let err = P4kArchive::open(&tmp).unwrap_err();
     assert!(
-        err.to_string().contains("flag_68"),
-        "expected writer-flag rejection, got {err}"
+        err.to_string().contains("incomplete bit"),
+        "expected incomplete-flag rejection, got {err}"
     );
 
     let _ = fs::remove_file(&tmp);
@@ -3382,7 +3459,7 @@ fn malformed_v2_non_boolean_encryption_flag_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     bytes[cdr_start + 0xAA..cdr_start + 0xAC].copy_from_slice(&2u16.to_le_bytes());
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_encryption_flag.p4k");
@@ -3463,7 +3540,7 @@ fn malformed_v2_data_offset_alignment_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     bytes[cdr_start + 0x1A..cdr_start + 0x22].copy_from_slice(&1u64.to_le_bytes());
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_data_alignment.p4k");
@@ -3492,7 +3569,7 @@ fn malformed_v2_oversized_name_offset_is_rejected_before_slicing() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     bytes[cdr_start + 0x22..cdr_start + 0x2A].copy_from_slice(&u64::MAX.to_le_bytes());
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_huge_name_offset.p4k");
@@ -3568,7 +3645,7 @@ fn malformed_v2_name_offsets_must_not_overlap_previous_name() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     let second_entry = cdr_start + CDR_V2_ENTRY_SIZE;
     bytes[second_entry + 0x22..second_entry + 0x2A].copy_from_slice(&0u64.to_le_bytes());
 
@@ -3622,8 +3699,8 @@ fn malformed_v2_payload_overlap_install_block_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
-    let overlapping_size = eocdr.end_of_payload + 1;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
+    let overlapping_size = eocdr.end_of_payload_offset + 1;
     bytes[cdr_start + 0x0A..cdr_start + 0x12].copy_from_slice(&overlapping_size.to_le_bytes());
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_payload_span.p4k");
@@ -3662,7 +3739,7 @@ fn malformed_v2_overlapping_payload_ranges_are_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     let second_entry = cdr_start + CDR_V2_ENTRY_SIZE;
     bytes[second_entry + 0x1A..second_entry + 0x22].copy_from_slice(&0u64.to_le_bytes());
 
@@ -3692,7 +3769,7 @@ fn malformed_v2_install_padding_is_rejected() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let padding_offset = eocdr.end_of_payload as usize + 8;
+    let padding_offset = eocdr.end_of_payload_offset as usize + 8;
     bytes[padding_offset] = 0xA5;
 
     let tmp = tempfile_path("svarog_p4k_bad_v2_install_padding.p4k");
@@ -3799,7 +3876,7 @@ fn truncated_data_offset_rejected_at_open() {
     let eocdr_start = bytes.len() - EOCD_V2_SIZE;
     let eocdr =
         <Eocd2Record as zerocopy::FromBytes>::read_from_bytes(&bytes[eocdr_start..]).unwrap();
-    let cdr_start = eocdr.end_of_file_block_offset as usize;
+    let cdr_start = eocdr.central_directory_record_offset as usize;
     let mut entry = <CentralDirectoryHeaderV2 as zerocopy::FromBytes>::read_from_bytes(
         &bytes[cdr_start..cdr_start + CDR_V2_ENTRY_SIZE],
     )
