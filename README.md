@@ -155,6 +155,7 @@ svarog p4k-extract -p Data.p4k -o ./output --filter "Data/Ships/.*" --regex
 # Raw dump of every file with no post-processing
 svarog p4k-dump -p Data.p4k -o ./raw
 svarog p4k-dump -p Data.p4k -o ./raw -j 8
+svarog p4k-dump -p Data.p4k -o ./raw-payloads --raw-payloads
 
 # Verify raw payload SHA-256 and decoded CRC32C metadata
 svarog p4k-verify -p Data.p4k

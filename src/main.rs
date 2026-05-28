@@ -207,6 +207,10 @@ enum Commands {
         /// Number of parallel workers (0 = auto)
         #[arg(long, short = 'j', default_value = "0")]
         parallel: usize,
+
+        /// Dump raw compressed/encrypted payload bytes instead of decoded files
+        #[arg(long)]
+        raw_payloads: bool,
     },
 
     /// Verify P4K raw payload SHA-256 and decoded CRC32C metadata
@@ -452,8 +456,9 @@ fn main() -> Result<()> {
             p4k,
             output,
             parallel,
+            raw_payloads,
         } => {
-            cmd_p4k_dump(&p4k, &output, parallel)?;
+            cmd_p4k_dump(&p4k, &output, parallel, raw_payloads)?;
         }
         Commands::P4kVerify { p4k, raw_sha_only } => {
             cmd_p4k_verify(&p4k, raw_sha_only)?;
@@ -1484,7 +1489,10 @@ fn cmd_p4k_list(
             .iter()
             .filter(|entry| filter.map_or(true, |pattern| glob_match(pattern, entry.name)))
             .map(|entry| {
-                json!({
+                let payload_offset = archive.payload_offset(&entry).with_context(|| {
+                    format!("Failed to resolve payload offset for {}", entry.name)
+                })?;
+                Ok(json!({
                     "name": entry.name,
                     "compressed_size": entry.compressed_size,
                     "uncompressed_size": entry.uncompressed_size,
@@ -1496,16 +1504,16 @@ fn cmd_p4k_list(
                         svarog::p4k::P4kVersion::V1 => "local_header",
                         svarog::p4k::P4kVersion::V2 => "payload",
                     },
-                    "payload_offset": archive.known_payload_offset(&entry),
+                    "payload_offset": payload_offset,
                     "crc32": format!("{:08x}", entry.crc32),
                     "last_mod_file_time": entry.last_mod_file_time,
                     "last_mod_file_date": entry.last_mod_file_date,
                     "signature": bytes_to_hex(&entry.signature),
                     "sha256": bytes_to_hex(&entry.sha256),
                     "bytes_already_written": entry.bytes_already_written,
-                })
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let freelist_blocks = archive
             .freelist_blocks()
             .iter()
@@ -1580,7 +1588,12 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn cmd_p4k_dump(p4k_path: &PathBuf, output: &PathBuf, parallel: usize) -> Result<()> {
+fn cmd_p4k_dump(
+    p4k_path: &PathBuf,
+    output: &PathBuf,
+    parallel: usize,
+    raw_payloads: bool,
+) -> Result<()> {
     println!("Dumping P4K archive: {}", p4k_path.display());
     let archive = P4kArchive::open(p4k_path).context("Failed to open P4K archive")?;
     println!(
@@ -1589,9 +1602,15 @@ fn cmd_p4k_dump(p4k_path: &PathBuf, output: &PathBuf, parallel: usize) -> Result
         archive.entry_count()
     );
     run_with_rayon_threads(parallel, || {
-        archive
-            .dump_to_dir(output)
-            .context("Failed to dump P4K archive")
+        if raw_payloads {
+            archive
+                .dump_raw_payloads_to_dir(output)
+                .context("Failed to dump raw P4K payloads")
+        } else {
+            archive
+                .dump_to_dir(output)
+                .context("Failed to dump P4K archive")
+        }
     })?;
     println!("Dumped to {}", output.display());
     Ok(())

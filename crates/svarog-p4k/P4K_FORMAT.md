@@ -25,6 +25,7 @@ Primary functions used:
 | `CCigPakFile::UpdateAndWriteCDR_v2` | v2 install block, 64 KiB CDR alignment, `0xCC` CDR entries, name table, and `0xAF` EOCDR at the end of the aligned EOF buffer |
 | `CCigPakFile::UpdateAndWriteCDR` | optional 64-byte manifest digest input is copied into `m_manifestSHA256` before the version-specific writer runs |
 | `CCigPakFile::UpdateAndWriteCDR_v2` | `m_manifestSHA256[0..64]` is copied verbatim into the v2 EOCDR at offset `0x69` |
+| `CCigPakFile::CreateP4K` | fresh archive creation rejects an output path that already exists before opening the P4K handle |
 | `CCigPakFile::ConvertP4k_v1_v2` | converter computes and removes v1 local-record spans, records freed ranges, and rewrites archive metadata as v2 |
 | `CCigPakFile::AddNewFiles` | newly added files are sorted by compressed size descending, then filename handle ascending, then placed into physical-sector-aligned archive storage spans |
 | `BuildUncompressedDataFileNameList` | encrypted entries are enumerated for the uncompressed-data workflow; retail P4Ks can still contain encrypted compressed payloads, which are decoded by AES decrypt-then-decompress |
@@ -135,6 +136,17 @@ through `P4kEntryMetadata`; it does not fabricate official signatures
 without a private key. The traced `VerifyP4kReadyFile_Impl` path checks
 payload SHA-256, payload MD5, decompressed CRC32C, and sizes, but does
 not call an RSA signature verifier.
+
+The signature is per-entry metadata, not a whole-archive signature. It
+does not include the physical `offset_to_file_data`, local-record
+placement, install block, freelist records, CDR/EOCD placement, or the
+archive byte stream as a whole. That is why the official patcher can
+move entries, reuse holes, append new payloads, and rewrite the CDR
+without needing a client-side private key: unchanged entries keep their
+existing signatures, while changed entries receive replacement metadata
+and signatures from the build/manifest pipeline. Payload integrity is
+separately pinned by the raw-payload SHA-256 field and decoded-content
+CRC32C.
 
 The final P4K CDR/local metadata uses `CRC32_ExecuteComputeFromBuffer`:
 CRC32C/Castagnoli over the uncompressed file bytes with initial
@@ -373,6 +385,35 @@ are rejected; the official merge path drops zero-sized blocks before
 writing, and `svarog-p4k` rejects merged-size overflow instead of
 saturating when it coalesces adjacent blocks.
 
+## Patch Updates and Free Space
+
+The patch/update path is allocator-based rather than full-archive
+compaction. After a manifest comparison produces added, modified, and
+deleted sets, `p4k::UpdateFileStructure` runs the structural pass:
+
+1. `RemoveFileEntries` removes deleted entries and records each old
+   aligned local-record-plus-payload span as a freelist block.
+2. `ShrinkFileEntries` updates metadata for modified entries whose new
+   aligned size is smaller; if the freed tail is at least one physical
+   sector, that tail becomes a freelist block.
+3. `ExpandFileEntries` handles modified entries whose new aligned size
+   is larger. If an adjacent freelist block begins exactly at the old
+   entry end and is large enough, the entry keeps its old offset and the
+   adjacent block is consumed or shortened. Otherwise the old span is
+   freed and the file is moved to the normal new-file allocation path.
+4. `AddNewFiles` allocates added files and too-large modified files
+   from freelist blocks sorted by offset, or appends them at
+   `m_nEndOfPayload` if no suitable block exists.
+5. The freelist is merged again, CDR/install metadata is rewritten, and
+   `DeallocateFreeBlocks`/tail trimming can move `m_nEndOfPayload`
+   backward when the final free block reaches the payload end.
+
+Interior holes are therefore expected. They are not corruption; they
+are persisted as freelist records and reused by later updates. The
+install block also carries `bytes_already_written_to_disk` per entry, so
+the downloader can track partial writes without treating the CDR as
+immutable.
+
 ## V1 to V2 Conversion
 
 The official converter supports v1 to v2 only. It removes local records
@@ -402,6 +443,18 @@ Because v2 loaders enforce that every payload offset is aligned to the
 v2 physical sector size, `svarog-p4k` rejects conversion options whose
 destination sector size is incompatible with the source v1 payload
 offsets.
+The Squadron42 v1 subarchive parser fatals if asked to parse an entry
+whose name ends in `.p4k_subarchive.zst`, with the message that this
+subarchive format is intended for P4K v2 and above. The v1-to-v2
+converter therefore treats that suffix as ordinary entry data during
+conversion: it preserves the raw stored payload and metadata and leaves
+validation/expansion of the P4K-subarchive trailer to the v2
+subarchive path.
+The create-ready command has a separate guard for the same suffix: if
+an input `.p4k_subarchive.zst` would be compressed by the outer P4K
+entry, it logs an error and requires compression level `0` (`Store`).
+`svarog-p4k` enforces that at the builder boundary for byte,
+filesystem, and precompressed creator inputs.
 
 ## P4K Subarchives
 
@@ -459,11 +512,13 @@ The crate tests pin:
 - decoded CRC32C verification streams through AES/decompression adapters instead of retaining full decoded payload buffers
 - decoded `read` paths use the same AES/decompression adapters, avoiding extra compressed/decrypted payload copies before producing the returned buffer
 - v1 payload placement detection distinguishes sector-spanned ZIP-local retail archives, variable-span ZIP-local archives, and aligned-record writer archives using sampled local-header spans plus SHA-256 metadata; after the first match it hashes the expected placement first and only probes the alternate candidate on mismatch, stops after a bounded confident sample set to keep large retail opens fast, and known-offset fast paths then use either `local_header_offset + sector_size`, parsed local-header spans, or the dump local-record formula, with per-entry SHA-256 fallback only when archive-wide detection remains inconclusive
+- exact public payload-offset resolution for v1 entries reuses the dump-backed local-header validation path and SHA-256 fallback used by extraction when the archive-wide placement convention is unknown, while v2 entries validate the direct `offset_to_file_data` range
 - v1 ZIP64 central-directory parsing uses the dump's fixed `0xFC + name_len` P4K record layout for direct field extraction, normalizes parsed path bytes without first allocating an intermediate lossy string, can scan record spans once and parse the fixed P4K metadata records in parallel under the `parallel` feature, and preserves CDR order plus malformed-span/custom-field checks
 - v2 central-directory parsing keeps name-table order validation sequential, checks normalized name-table bytes before allocation, and moves validated name strings into final entry records; the sequential path validates each name from the current packed `0xCC` CDR record's `0x22` `offset_to_filename` field and fills final entry plus payload-range arrays directly without staging a separate name vector, while the parallel path first reads those packed name offsets and then parses fixed CDR records plus install progress values under the `parallel` feature, preserving entry order and the existing payload overlap validation without cloning or normalizing every valid name after validation
 - raw-payload SHA verification and full SHA-plus-CRC integrity verification can run in physical offset order so large v1 retail archives are read sequentially instead of filename-handle order
 - zero-copy dump/verify fast path for unencrypted stored payloads with the same stored-size validation as decoded reads
 - streaming dump/extract writer path for stored, compressed, and encrypted entries, avoiding full decoded payload allocation before file output
+- raw-payload dump/extract writer path for the exact compressed/post-encryption byte stream covered by entry SHA-256 metadata, exposed through the library and `p4k-dump --raw-payloads`
 - parallel dump-to-directory path under the `parallel` feature, with CLI worker-count control, one-time parent-directory creation for unique output paths, ordered sequential fallback for duplicate output paths, and explicit output flushing so late buffered write errors are reported
 - CLI P4K extraction planning filters archive entries, detects DCB/SOCPAK paths, performs incremental skip checks, and builds extraction tasks in one archive pass without retaining a duplicate matched-entry name list; extension checks use ASCII case-insensitive suffix comparison without lowercasing each path
 - CLI SOCPAK expansion extracts the `.socpak` P4K entry to disk and opens that file as the ZIP source, avoiding a whole-SOCPAK resident buffer; nested ZIP members then probe only the first eight bytes and stream non-CryXML files directly to disk, while `CryXmlB\0` candidates must also pass cheap 36-byte header bounds validation before the member is buffered for binary-to-XML conversion
@@ -472,6 +527,7 @@ The crate tests pin:
 - v2 writer checked CDR/name-table/EOF tail size arithmetic, including CDR offset overflow rejection
 - v1/v2 writer ordering of newly added entries by compressed size and deterministic filename-handle tie-break; fresh writer filename-handle assignment normalizes each staged path once, sorts the normalized names, and assigns handles back by original entry index to avoid a second per-entry normalization pass
 - v2 writer physical-sector alignment for each newly added entry
+- fresh empty v1/v2 archive initialization layout, including v1's `0x72`-byte ZIP64/EOCD tail at offset zero and v2's EOCDR at the end of one physical sector
 - filesystem-backed writer DOS timestamp preservation
 - filesystem-backed creator staging can produce opaque staged entries directly from files and append them to one builder, so parallel CLI creation no longer allocates one intermediate `P4kBuilder` per input file while preserving caller order before the dump-backed fresh-file placement sort
 - filesystem-backed unencrypted stored entries are staged without retaining a payload buffer; v2 creation resolves CRC32C/SHA-256 in the single payload copy pass because its CDR follows payload data, while v1 creation reserves the dump-sized local-record span, resolves CRC32C/SHA-256 during the payload copy, then seeks back to fill the local header before writing the CDR
@@ -480,7 +536,8 @@ The crate tests pin:
 - temporary staged payload files are SHA-256 checked during the output copy pass, avoiding a separate full-file validation read before copying archive payload bytes
 - v2 EOCDR manifest digest pass-through
 - buffered file output for fresh v1/v2 creation and v1-to-v2 conversion without changing on-disk byte layout
-- fresh v1/v2 archive creation writes to a sibling temporary output and publishes it with `rename` only after the full archive is written successfully, preserving existing targets on staged-payload validation failures
+- fresh v1/v2 archive creation writes to a sibling temporary output and publishes it with `rename` only after the full archive is written successfully, removing temporary output and leaving no published archive on staged-payload validation failures
+- fresh v1/v2 archive creation rejects existing output files like `CCigPakFile::CreateP4K` before the temporary writer is started
 - v1 to v2 conversion first attempts Linux reflink cloning for the preserved source prefix, then falls back to large buffered copy with exact byte-count validation before the v2 tail is written
 - v1 to v2 conversion builds the v2 tail from validated payload offsets and lengths without retaining per-entry payload slice references or a parallel payload-offset array, computes the preserved payload prefix end in a streaming max pass instead of materializing per-entry end offsets, and keeps large-archive metadata memory bounded while preserving local-header/range checks
 - v1 to v2 conversion writes to a sibling temporary output and publishes it with `rename` only after the preserved payload prefix and full v2 tail are written successfully
@@ -496,11 +553,13 @@ The crate tests pin:
 - v1/v2 encrypted stored and encrypted compressed writer output and readback
 - fresh v2 empty entries use zero data offsets even when written after non-empty payloads
 - CLI create/verify/dump/extract/conversion readback for store, raw deflate, zlib deflate, zstd, deprecated zstd, and encrypted zstd payloads
-- CLI JSON metadata dump for archive layout, freelists, v1 payload-placement convention, method, offset kind, known payload offset, CRC/SHA/signature, encryption, install progress fields, and converted v2 freelist metadata
+- CLI JSON metadata dump for archive layout, freelists, v1 payload-placement convention, method, offset kind, exact validated payload offset, CRC/SHA/signature, encryption, install progress fields, and converted v2 freelist metadata
 - precompressed writer rejection for invalid stored payload sizes
 - P4K AES-128-CBC fixed-vector encryption/decryption
 - RSA signature metadata digest field order and path normalization
 - seeked `.p4k_subarchive.zst` metadata parsing from a file/reader without loading payload bytes, plus an opt-in real-data test via `SVAROG_P4K_SUBARCHIVE_TEST_FILE`
+- creator rejection of outer-compressed `.p4k_subarchive.zst` inputs while allowing stored entries
+- v1 to v2 conversion carrying `.p4k_subarchive.zst` entries as opaque payloads instead of invoking the legacy v1 subarchive parser
 - fresh byte/file writer preservation of caller-supplied DOS timestamp and 128-byte signature metadata
 - v1 to v2 conversion freelist records for removed local headers
 - v1 to v2 conversion preserving encrypted compressed payload bytes
@@ -556,6 +615,8 @@ SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test -p svarog-p4k real_world_p4k_p
 SVAROG_P4K_TEST_DIR=/path/to/corpus cargo test -p svarog-p4k real_world_p4k_corpus_parses -- --nocapture
 SVAROG_P4K_TEST_SHA256=1 SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test -p svarog-p4k --features parallel real_world_p4k_parses -- --nocapture
 SVAROG_P4K_TEST_VERIFY=1 SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test -p svarog-p4k real_world_p4k_parses -- --nocapture
+SVAROG_P4K_SUBARCHIVE_TEST_FILE=/path/to/file.p4k_subarchive.zst cargo test -p svarog-p4k real_world_subarchive_file_parses -- --nocapture
+SVAROG_P4K_SUBARCHIVE_TEST_DIR=/path/to/subarchives cargo test -p svarog-p4k real_world_subarchive_corpus_parses -- --nocapture
 ```
 
 Without `SVAROG_P4K_TEST_VERIFY` or `SVAROG_P4K_TEST_SHA256`, the tests

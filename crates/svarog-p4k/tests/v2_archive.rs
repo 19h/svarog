@@ -846,6 +846,138 @@ fn writer_v2_eocdr_fields_match_dump_offsets() {
 }
 
 #[test]
+fn writer_builds_empty_v1_initial_layout_like_initialize_pak_file_v1() {
+    let tmp = tempfile_path("svarog_p4k_empty_init_v1.p4k");
+    let mut options = P4kWriterOptions::default();
+    options.sector_size = SECTOR_SIZE;
+
+    let builder = P4kBuilder::with_options(options);
+    let stats = builder.write_v1_to_file(&tmp).unwrap();
+    let bytes = fs::read(&tmp).unwrap();
+
+    assert_eq!(stats.entry_count, 0);
+    assert_eq!(stats.payload_end, 0);
+    assert_eq!(stats.cdr_offset, 0);
+    assert_eq!(stats.cdr_size, 0);
+    assert_eq!(stats.file_size, SECTOR_SIZE);
+    assert_eq!(bytes.len(), SECTOR_SIZE as usize);
+
+    assert_eq!(
+        u32::from_le_bytes(bytes[0x00..0x04].try_into().unwrap()),
+        0x0606_4b50
+    );
+    assert_eq!(
+        u64::from_le_bytes(bytes[0x04..0x0C].try_into().unwrap()),
+        0x2C
+    );
+    assert_eq!(
+        u16::from_le_bytes(bytes[0x0C..0x0E].try_into().unwrap()),
+        46
+    );
+    assert_eq!(
+        u16::from_le_bytes(bytes[0x0E..0x10].try_into().unwrap()),
+        45
+    );
+    assert_eq!(u32::from_le_bytes(bytes[0x10..0x14].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(bytes[0x18..0x20].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(bytes[0x20..0x28].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(bytes[0x28..0x30].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(bytes[0x30..0x38].try_into().unwrap()), 0);
+
+    assert_eq!(
+        u32::from_le_bytes(bytes[0x38..0x3C].try_into().unwrap()),
+        0x0706_4b50
+    );
+    assert_eq!(u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(bytes[0x40..0x48].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(bytes[0x48..0x4C].try_into().unwrap()), 1);
+
+    assert_eq!(
+        u32::from_le_bytes(bytes[0x4C..0x50].try_into().unwrap()),
+        0x0605_4b50
+    );
+    assert_eq!(&bytes[0x50..0x60], &[0xFF; 16]);
+    assert_eq!(
+        u16::from_le_bytes(bytes[0x60..0x62].try_into().unwrap()),
+        16
+    );
+    assert_eq!(&bytes[0x62..0x64], b"CI");
+    assert_eq!(
+        u32::from_le_bytes(bytes[0x64..0x68].try_into().unwrap()),
+        0x0001_0047
+    );
+    assert_eq!(
+        u16::from_le_bytes(bytes[0x68..0x6A].try_into().unwrap()),
+        SECTOR_SIZE as u16
+    );
+    assert_eq!(u64::from_le_bytes(bytes[0x6A..0x72].try_into().unwrap()), 0);
+    assert!(bytes[0x72..].iter().all(|byte| *byte == 0));
+
+    let archive = P4kArchive::open(&tmp).unwrap();
+    assert_eq!(archive.version(), P4kVersion::V1);
+    assert_eq!(archive.entry_count(), 0);
+    assert!(archive.freelist_blocks().is_empty());
+
+    let _ = fs::remove_file(&tmp);
+}
+
+#[test]
+fn writer_builds_empty_v2_initial_layout_like_initialize_pak_file_v2() {
+    let tmp = tempfile_path("svarog_p4k_empty_init_v2.p4k");
+    let mut options = P4kWriterOptions::default();
+    options.sector_size = SECTOR_SIZE;
+
+    let builder = P4kBuilder::with_options(options.clone());
+    let stats = builder.write_to_file(&tmp).unwrap();
+    let bytes = fs::read(&tmp).unwrap();
+
+    assert_eq!(stats.entry_count, 0);
+    assert_eq!(stats.payload_end, 0);
+    assert_eq!(stats.cdr_offset, 0);
+    assert_eq!(stats.cdr_size, 0);
+    assert_eq!(stats.name_table_size, 0);
+    assert_eq!(stats.file_size, SECTOR_SIZE);
+    assert_eq!(bytes.len(), SECTOR_SIZE as usize);
+
+    let eocdr_start = SECTOR_SIZE as usize - EOCD_V2_SIZE;
+    assert!(bytes[..eocdr_start].iter().all(|byte| *byte == 0));
+    let eocdr = &bytes[eocdr_start..];
+    let field_u64 =
+        |offset: usize| u64::from_le_bytes(eocdr[offset..offset + 8].try_into().unwrap());
+    assert_eq!(field_u64(0x00), 0);
+    assert_eq!(field_u64(0x08), 0);
+    assert_eq!(field_u64(0x10), 0);
+    assert_eq!(field_u64(0x18), 0);
+    assert_eq!(field_u64(0x20), 0);
+    assert_eq!(field_u64(0x28), 0);
+    assert_eq!(field_u64(0x30), 0);
+    assert_eq!(field_u64(0x38), 0);
+    assert_eq!(field_u64(0x40), 0);
+    assert_eq!(field_u64(0x48), 0);
+    assert_eq!(field_u64(0x50), 0);
+    assert_eq!(field_u64(0x58), 0);
+    assert_eq!(field_u64(0x60), SECTOR_SIZE);
+    assert_eq!(eocdr[0x68], 1);
+    assert_eq!(&eocdr[0x69..0xA9], &options.manifest_sha256);
+    assert_eq!(
+        u16::from_le_bytes(eocdr[0xA9..0xAB].try_into().unwrap()),
+        EOCD_V2_VERSION
+    );
+    assert_eq!(
+        u32::from_le_bytes(eocdr[0xAB..0xAF].try_into().unwrap()),
+        EOCD_V2_MAGIC
+    );
+
+    let archive = P4kArchive::open(&tmp).unwrap();
+    assert_eq!(archive.version(), P4kVersion::V2);
+    assert_eq!(archive.entry_count(), 0);
+    assert!(archive.freelist_blocks().is_empty());
+
+    let _ = fs::remove_file(&tmp);
+}
+
+#[test]
 fn writer_builds_readable_v1_layout() {
     let tmp = tempfile_path("svarog_p4k_writer_v1.p4k");
     let mut options = P4kWriterOptions::default();
@@ -1741,6 +1873,14 @@ fn extract_to_writer_streams_archive_entries() {
         archive.extract_to_writer(&entry, &mut output).unwrap();
         assert_eq!(output, expected);
     }
+    let entry = archive.find("encrypted.bin").unwrap();
+    let mut raw = Vec::new();
+    archive
+        .extract_raw_payload_to_writer(&entry, &mut raw)
+        .unwrap();
+    assert_eq!(raw.len(), entry.compressed_size as usize);
+    assert_ne!(raw, encrypted);
+    assert_eq!(sha256_array(&raw), entry.sha256);
 
     let _ = fs::remove_file(&tmp);
 }
@@ -1797,6 +1937,48 @@ fn convert_v1_to_v2_preserves_stored_payload() {
     let entry = archive.get(0).unwrap();
     assert_eq!(entry.name, "plain.txt");
     assert_eq!(archive.read(&entry).unwrap(), b"payload");
+
+    let _ = fs::remove_file(&v1);
+    let _ = fs::remove_file(&v2);
+}
+
+#[test]
+fn convert_v1_to_v2_carries_p4k_subarchive_zst_as_opaque_payload() {
+    let v1 = tempfile_path("svarog_p4k_convert_source_v1_p4k_subarchive.p4k");
+    let v2 = tempfile_path("svarog_p4k_convert_dest_v2_p4k_subarchive.p4k");
+    let name = "Data/SubArchives/example.p4k_subarchive.zst";
+    let payload = b"not a valid p4k_subarchive, but conversion must not parse it";
+
+    let mut options = P4kWriterOptions::default();
+    options.sector_size = SECTOR_SIZE;
+    options.compression = CompressionMethod::Store;
+    let mut builder = P4kBuilder::with_options(options.clone());
+    builder.add_bytes(name, payload).unwrap();
+    builder.write_v1_to_file(&v1).unwrap();
+
+    let stats = convert_v1_to_v2(&v1, &v2, options).unwrap();
+    assert_eq!(stats.entry_count, 1);
+
+    let converted = P4kArchive::open(&v2).unwrap();
+    assert_eq!(converted.version(), P4kVersion::V2);
+    let entry = converted.find(name).unwrap();
+    assert_eq!(entry.compression_method, CompressionMethod::Store);
+    assert!(!entry.is_encrypted);
+    assert_eq!(entry.compressed_size, payload.len() as u64);
+    assert_eq!(entry.uncompressed_size, payload.len() as u64);
+    assert_eq!(converted.read(&entry).unwrap(), payload);
+
+    let source = fs::read(&v1).unwrap();
+    let source_payload_offset = source
+        .windows(payload.len())
+        .position(|window| window == payload)
+        .unwrap() as u64;
+    let converted_bytes = fs::read(&v2).unwrap();
+    let cdr = &converted_bytes[stats.cdr_offset as usize..][..CDR_V2_ENTRY_SIZE];
+    assert_eq!(
+        u64::from_le_bytes(cdr[0x1A..0x22].try_into().unwrap()),
+        source_payload_offset
+    );
 
     let _ = fs::remove_file(&v1);
     let _ = fs::remove_file(&v2);

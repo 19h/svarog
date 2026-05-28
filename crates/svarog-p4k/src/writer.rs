@@ -234,6 +234,8 @@ fn stage_file_entry_with_metadata(
         (options.compression, encrypted)
     };
 
+    reject_compressed_p4k_subarchive(archive_name, method)?;
+
     if method == CompressionMethod::Store && !encrypted {
         return build_entry_with_metadata(
             archive_name,
@@ -300,6 +302,7 @@ fn build_entry_with_metadata(
     sha256: Option<[u8; 32]>,
 ) -> Result<BuilderEntry> {
     let name = normalize_archive_name(name)?;
+    reject_compressed_p4k_subarchive(&name, method)?;
     if encrypted && payload.len() % 16 != 0 {
         return Err(Error::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -601,6 +604,7 @@ impl P4kBuilder {
         } else {
             (method, encrypted)
         };
+        reject_compressed_p4k_subarchive(name.as_ref(), method)?;
         let mut payload = compress_bytes(bytes, method, &self.options)?;
         if encrypted {
             payload = crypto::encrypt(&payload).map_err(|e| Error::Encryption(e.to_string()))?;
@@ -793,6 +797,7 @@ impl P4kBuilder {
         B: Into<Vec<u8>>,
     {
         let payload = payload.into();
+        reject_compressed_p4k_subarchive(name.as_ref(), method)?;
         if encrypted && payload.len() % 16 != 0 {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -871,12 +876,16 @@ impl P4kBuilder {
 
     /// Write the archive to a new file.
     pub fn write_to_file<P: AsRef<Path>>(&self, path: P) -> Result<P4kWriteStats> {
-        write_archive_to_temp_output(path.as_ref(), |writer| self.write_to(writer))
+        let path = path.as_ref();
+        ensure_fresh_output_path(path)?;
+        write_archive_to_temp_output(path, |writer| self.write_to(writer))
     }
 
     /// Write a legacy ZIP64-based P4K v1 archive to a new file.
     pub fn write_v1_to_file<P: AsRef<Path>>(&self, path: P) -> Result<P4kWriteStats> {
-        write_archive_to_temp_output(path.as_ref(), |writer| self.write_v1_to(writer))
+        let path = path.as_ref();
+        ensure_fresh_output_path(path)?;
+        write_archive_to_temp_output(path, |writer| self.write_v1_to(writer))
     }
 
     /// Write the archive to any seekable writer.
@@ -1031,35 +1040,64 @@ impl P4kBuilder {
 
 /// Dump every entry from `archive` to `output_dir`.
 pub fn dump_archive_to_dir<P: AsRef<Path>>(archive: &P4kArchive, output_dir: P) -> Result<()> {
-    let output_dir = output_dir.as_ref();
+    dump_archive_to_dir_with_mode(archive, output_dir.as_ref(), DumpMode::Decoded)
+}
+
+/// Dump every entry's raw stored payload from `archive` to `output_dir`.
+pub fn dump_archive_raw_payloads_to_dir<P: AsRef<Path>>(
+    archive: &P4kArchive,
+    output_dir: P,
+) -> Result<()> {
+    dump_archive_to_dir_with_mode(archive, output_dir.as_ref(), DumpMode::RawPayload)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DumpMode {
+    Decoded,
+    RawPayload,
+}
+
+fn dump_archive_to_dir_with_mode(
+    archive: &P4kArchive,
+    output_dir: &Path,
+    mode: DumpMode,
+) -> Result<()> {
     fs::create_dir_all(output_dir)?;
 
     #[cfg(feature = "parallel")]
     {
-        dump_archive_to_dir_parallel(archive, output_dir)
+        dump_archive_to_dir_parallel(archive, output_dir, mode)
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        dump_archive_to_dir_sequential(archive, output_dir)
+        dump_archive_to_dir_sequential(archive, output_dir, mode)
     }
 }
 
-fn dump_archive_to_dir_sequential(archive: &P4kArchive, output_dir: &Path) -> Result<()> {
+fn dump_archive_to_dir_sequential(
+    archive: &P4kArchive,
+    output_dir: &Path,
+    mode: DumpMode,
+) -> Result<()> {
     for (index, entry) in archive.iter().enumerate() {
         if entry.name.ends_with('\\') || entry.name.ends_with('/') {
             continue;
         }
 
         let out_path = safe_output_path(output_dir, entry.name)?;
-        dump_entry_to_path(archive, index, &out_path)?;
+        dump_entry_to_path(archive, index, &out_path, mode)?;
     }
 
     Ok(())
 }
 
 #[cfg(feature = "parallel")]
-fn dump_archive_to_dir_parallel(archive: &P4kArchive, output_dir: &Path) -> Result<()> {
+fn dump_archive_to_dir_parallel(
+    archive: &P4kArchive,
+    output_dir: &Path,
+    mode: DumpMode,
+) -> Result<()> {
     use rayon::prelude::*;
 
     let mut tasks = Vec::with_capacity(archive.entry_count());
@@ -1079,7 +1117,7 @@ fn dump_archive_to_dir_parallel(archive: &P4kArchive, output_dir: &Path) -> Resu
     }
 
     if has_duplicate_output {
-        return dump_archive_to_dir_sequential(archive, output_dir);
+        return dump_archive_to_dir_sequential(archive, output_dir, mode);
     }
 
     let mut parent_dirs = HashSet::with_capacity(tasks.len());
@@ -1092,21 +1130,42 @@ fn dump_archive_to_dir_parallel(archive: &P4kArchive, output_dir: &Path) -> Resu
         fs::create_dir_all(dir)?;
     }
 
-    tasks
-        .par_iter()
-        .try_for_each(|(index, out_path)| dump_entry_to_prepared_path(archive, *index, out_path))
+    tasks.par_iter().try_for_each(|(index, out_path)| {
+        dump_entry_to_prepared_path(archive, *index, out_path, mode)
+    })
 }
 
-fn dump_entry_to_path(archive: &P4kArchive, index: usize, out_path: &Path) -> Result<()> {
+fn dump_entry_to_path(
+    archive: &P4kArchive,
+    index: usize,
+    out_path: &Path,
+    mode: DumpMode,
+) -> Result<()> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    dump_entry_to_prepared_path(archive, index, out_path)
+    dump_entry_to_prepared_path(archive, index, out_path, mode)
 }
 
-fn dump_entry_to_prepared_path(archive: &P4kArchive, index: usize, out_path: &Path) -> Result<()> {
+fn dump_entry_to_prepared_path(
+    archive: &P4kArchive,
+    index: usize,
+    out_path: &Path,
+    mode: DumpMode,
+) -> Result<()> {
     let mut output = BufWriter::with_capacity(1024 * 1024, File::create(out_path)?);
-    archive.extract_index_to_writer(index, &mut output)?;
+    match mode {
+        DumpMode::Decoded => archive.extract_index_to_writer(index, &mut output)?,
+        DumpMode::RawPayload => {
+            let entry = archive.get(index).ok_or_else(|| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "entry index out of bounds",
+                ))
+            })?;
+            archive.extract_raw_payload_to_writer(&entry, &mut output)?;
+        }
+    }
     output.flush()?;
     Ok(())
 }
@@ -1282,6 +1341,16 @@ fn finish_temp_output<T>(temp_output: PathBuf, output: &Path, result: Result<T>)
             Err(err)
         }
     }
+}
+
+fn ensure_fresh_output_path(output: &Path) -> Result<()> {
+    if output.try_exists()? {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("File already exists: {}", output.display()),
+        )));
+    }
+    Ok(())
 }
 
 fn same_existing_file(input: &Path, output: &Path) -> Result<bool> {
@@ -2570,6 +2639,22 @@ fn normalize_archive_name(name: &str) -> Result<String> {
     Ok(normalized)
 }
 
+fn reject_compressed_p4k_subarchive(name: &str, method: CompressionMethod) -> Result<()> {
+    if method != CompressionMethod::Store && is_p4k_subarchive_zst_name(name) {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            ".p4k_subarchive.zst entries must use store compression",
+        )));
+    }
+    Ok(())
+}
+
+fn is_p4k_subarchive_zst_name(name: &str) -> bool {
+    const SUFFIX: &str = ".p4k_subarchive.zst";
+    name.get(name.len().saturating_sub(SUFFIX.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
+}
+
 fn normalize_p4k_path(path: &str, lowercase: bool) -> String {
     let mut out = Vec::with_capacity(path.len());
     for &byte in path.as_bytes() {
@@ -2816,6 +2901,60 @@ mod tests {
             normalize_archive_name("../escape.bin").unwrap(),
             ".escape.bin"
         );
+    }
+
+    #[test]
+    fn p4k_subarchive_zst_creator_entries_must_be_stored() {
+        let input = temp_writer_path("svarog_p4k_subarchive_store_only_input.bin");
+        let name = "Data/SubArchives/Example.P4K_SUBARCHIVE.ZST";
+        let payload = b"p4k subarchive payload";
+        std::fs::write(&input, payload).unwrap();
+
+        let mut default_builder = P4kBuilder::new();
+        let err = default_builder.add_bytes(name, payload).unwrap_err();
+        assert!(
+            err.to_string().contains("must use store compression"),
+            "expected compressed subarchive rejection, got {err}"
+        );
+
+        let mut precompressed_builder = P4kBuilder::new();
+        let err = precompressed_builder
+            .add_precompressed(
+                name,
+                payload.to_vec(),
+                payload.len() as u64,
+                CompressionMethod::Zstd,
+                svarog_common::crc::hash_bytes(payload),
+                false,
+                [0; 128],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must use store compression"),
+            "expected precompressed subarchive rejection, got {err}"
+        );
+
+        let mut file_builder = P4kBuilder::with_options(P4kWriterOptions {
+            compression: CompressionMethod::Zstd,
+            ..Default::default()
+        });
+        let err = file_builder.add_file(&input, name).unwrap_err();
+        assert!(
+            err.to_string().contains("must use store compression"),
+            "expected filesystem subarchive rejection, got {err}"
+        );
+
+        let mut store_builder = P4kBuilder::with_options(P4kWriterOptions {
+            compression: CompressionMethod::Store,
+            ..Default::default()
+        });
+        store_builder.add_bytes(name, payload).unwrap();
+        assert_eq!(
+            store_builder.entries[0].compression_method,
+            CompressionMethod::Store
+        );
+
+        let _ = std::fs::remove_file(&input);
     }
 
     #[test]
@@ -3294,11 +3433,48 @@ mod tests {
     }
 
     #[test]
-    fn write_to_file_preserves_existing_output_when_lazy_file_length_changes() {
-        let input = temp_writer_path("svarog_p4k_file_create_changed_input.bin");
+    fn write_to_file_rejects_existing_output_like_official_create_p4k() {
         let output = temp_writer_path("svarog_p4k_file_create_existing_v2.p4k");
-        std::fs::write(&input, b"abcdef").unwrap();
         std::fs::write(&output, b"existing archive").unwrap();
+
+        let mut builder = P4kBuilder::new();
+        builder.add_bytes("file.bin", b"payload").unwrap();
+
+        let err = builder.write_to_file(&output).unwrap_err();
+        assert!(
+            err.to_string().contains("File already exists"),
+            "expected official CreateP4K existing-file rejection, got {err}"
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing archive");
+        assert_no_temp_output_leak(&output);
+
+        let _ = std::fs::remove_file(&output);
+    }
+
+    #[test]
+    fn write_v1_to_file_rejects_existing_output_like_official_create_p4k() {
+        let output = temp_writer_path("svarog_p4k_file_create_existing_v1.p4k");
+        std::fs::write(&output, b"existing archive").unwrap();
+
+        let mut builder = P4kBuilder::new();
+        builder.add_bytes("file.bin", b"payload").unwrap();
+
+        let err = builder.write_v1_to_file(&output).unwrap_err();
+        assert!(
+            err.to_string().contains("File already exists"),
+            "expected official CreateP4K existing-file rejection, got {err}"
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing archive");
+        assert_no_temp_output_leak(&output);
+
+        let _ = std::fs::remove_file(&output);
+    }
+
+    #[test]
+    fn write_to_file_removes_temporary_output_when_lazy_file_length_changes() {
+        let input = temp_writer_path("svarog_p4k_file_create_changed_input.bin");
+        let output = temp_writer_path("svarog_p4k_file_create_changed_v2.p4k");
+        std::fs::write(&input, b"abcdef").unwrap();
 
         let options = P4kWriterOptions {
             compression: CompressionMethod::Store,
@@ -3314,7 +3490,7 @@ mod tests {
             err.to_string().contains("staged file changed"),
             "expected staged file mutation rejection, got {err}"
         );
-        assert_eq!(std::fs::read(&output).unwrap(), b"existing archive");
+        assert!(!output.exists(), "failed create must not publish output");
         assert_no_temp_output_leak(&output);
 
         let _ = std::fs::remove_file(&input);
@@ -3322,11 +3498,10 @@ mod tests {
     }
 
     #[test]
-    fn write_v1_to_file_preserves_existing_output_when_lazy_file_length_changes() {
+    fn write_v1_to_file_removes_temporary_output_when_lazy_file_length_changes() {
         let input = temp_writer_path("svarog_p4k_file_create_changed_input_v1.bin");
-        let output = temp_writer_path("svarog_p4k_file_create_existing_v1.p4k");
+        let output = temp_writer_path("svarog_p4k_file_create_changed_v1.p4k");
         std::fs::write(&input, b"abcdef").unwrap();
-        std::fs::write(&output, b"existing archive").unwrap();
 
         let options = P4kWriterOptions {
             compression: CompressionMethod::Store,
@@ -3342,7 +3517,7 @@ mod tests {
             err.to_string().contains("staged file changed"),
             "expected staged file mutation rejection, got {err}"
         );
-        assert_eq!(std::fs::read(&output).unwrap(), b"existing archive");
+        assert!(!output.exists(), "failed create must not publish output");
         assert_no_temp_output_leak(&output);
 
         let _ = std::fs::remove_file(&input);

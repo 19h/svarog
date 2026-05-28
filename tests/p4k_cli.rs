@@ -298,6 +298,31 @@ fn cli_create_verify_dump_and_convert_p4k_archives() {
         .unwrap(),
         [0u8, 1, 2, 3, 4, 5, 0xFE]
     );
+    let raw_dump_encrypted_zstd = root.join("raw-dump-encrypted-zstd");
+    svarog([
+        "p4k-dump",
+        "-p",
+        encrypted_zstd.to_str().unwrap(),
+        "-o",
+        raw_dump_encrypted_zstd.to_str().unwrap(),
+        "--raw-payloads",
+    ]);
+    let raw_metadata = svarog([
+        "p4k-list",
+        "-p",
+        encrypted_zstd.to_str().unwrap(),
+        "--filter",
+        "readme.txt",
+        "--json",
+    ]);
+    let raw_metadata: serde_json::Value = serde_json::from_str(&raw_metadata).unwrap();
+    let raw_entry = &raw_metadata["entries"][0];
+    let raw_offset = raw_entry["payload_offset"].as_u64().unwrap() as usize;
+    let raw_size = raw_entry["compressed_size"].as_u64().unwrap() as usize;
+    let archive_bytes = fs::read(&encrypted_zstd).unwrap();
+    let raw_file = fs::read(raw_dump_encrypted_zstd.join("readme.txt")).unwrap();
+    assert_eq!(&raw_file, &archive_bytes[raw_offset..raw_offset + raw_size]);
+    assert_ne!(raw_file, b"created through CLI\n");
 
     let extract_encrypted_zstd = root.join("extract-encrypted-zstd");
     let extract_encrypted_zstd_output = svarog([

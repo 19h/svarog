@@ -600,4 +600,47 @@ mod tests {
             subarchive.cdr_info.number_of_entries
         );
     }
+
+    /// Opt-in corpus test. Set `SVAROG_P4K_SUBARCHIVE_TEST_DIR` to a directory
+    /// containing `.p4k_subarchive.zst` samples; every matching direct child is
+    /// parsed with the seeked metadata path.
+    #[test]
+    fn real_world_subarchive_corpus_parses() {
+        let Ok(path) = std::env::var("SVAROG_P4K_SUBARCHIVE_TEST_DIR") else {
+            eprintln!("skipping: SVAROG_P4K_SUBARCHIVE_TEST_DIR is unset");
+            return;
+        };
+        let root = Path::new(&path);
+        if !root.is_dir() {
+            eprintln!("skipping: SVAROG_P4K_SUBARCHIVE_TEST_DIR points at missing directory");
+            return;
+        }
+
+        let mut parsed = 0usize;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".p4k_subarchive.zst") {
+                continue;
+            }
+
+            let subarchive = parse_subarchive_file(&path).unwrap();
+            eprintln!(
+                "opened {}: version={} entries={} cdr_size={}",
+                path.display(),
+                subarchive.cdr_info.version,
+                subarchive.entries.len(),
+                subarchive.cdr_info.cdr_size
+            );
+            assert_eq!(
+                subarchive.entries.len() as u64,
+                subarchive.cdr_info.number_of_entries
+            );
+            parsed += 1;
+        }
+
+        assert!(parsed > 0, "no .p4k_subarchive.zst files found in {path}");
+    }
 }

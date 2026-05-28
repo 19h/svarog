@@ -83,7 +83,11 @@ pub struct P4kEntryRef<'a> {
     pub compression_method: CompressionMethod,
     /// Whether the entry is encrypted
     pub is_encrypted: bool,
-    /// Offset to local file header
+    /// Entry offset from the central directory.
+    ///
+    /// For v1 archives this is the ZIP local-file-header offset. For v2
+    /// archives this is `offset_to_file_data` and points directly at the
+    /// compressed payload bytes because v2 has no per-entry local header.
     pub local_header_offset: u64,
     /// CIG CRC32C checksum
     pub crc32: u32,
@@ -326,6 +330,42 @@ impl P4kArchive {
             .then_some(offset)
     }
 
+    /// Resolve the exact compressed-payload offset for an entry.
+    ///
+    /// For v2 this validates the direct `offset_to_file_data` range. For v1
+    /// this follows the same local-header validation and placement selection
+    /// path used by reads, including the SHA-256 fallback when archive-wide
+    /// placement detection is inconclusive.
+    pub fn payload_offset(&self, entry: &P4kEntryRef<'_>) -> Result<u64> {
+        if entry.compressed_size == 0 {
+            return Ok(0);
+        }
+
+        match self.version {
+            P4kVersion::V2 => {
+                self.payload_slice_by_data_offset(
+                    entry.local_header_offset,
+                    entry.compressed_size,
+                )?;
+                Ok(entry.local_header_offset)
+            }
+            P4kVersion::V1 => {
+                let (offset, _, _) = self.payload_location_by_local_header(
+                    entry.name,
+                    entry.local_header_offset,
+                    entry.compressed_size,
+                    entry.uncompressed_size,
+                    entry.compression_method,
+                    entry.crc32,
+                    entry.last_mod_file_time,
+                    entry.last_mod_file_date,
+                    entry.sha256,
+                )?;
+                Ok(offset)
+            }
+        }
+    }
+
     /// Iterate over entries with zero-copy access.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = P4kEntryRef<'_>> + '_ {
@@ -432,6 +472,21 @@ impl P4kArchive {
         } else {
             decompress::decode_to_writer(payload, entry.compression_method, expected_size, writer)?;
         }
+        Ok(())
+    }
+
+    /// Write the raw stored payload bytes for an entry.
+    ///
+    /// The output is the exact compressed, post-encryption byte stream covered
+    /// by the entry's SHA-256 metadata. No decompression or decryption is
+    /// performed.
+    pub fn extract_raw_payload_to_writer<W: Write>(
+        &self,
+        entry: &P4kEntryRef<'_>,
+        writer: &mut W,
+    ) -> Result<()> {
+        let payload = self.raw_payload_slice(entry)?;
+        writer.write_all(payload)?;
         Ok(())
     }
 
@@ -707,6 +762,11 @@ impl P4kArchive {
     /// Dump every archive entry into `output_dir`.
     pub fn dump_to_dir<P: AsRef<Path>>(&self, output_dir: P) -> Result<()> {
         crate::writer::dump_archive_to_dir(self, output_dir)
+    }
+
+    /// Dump every archive entry's raw stored payload into `output_dir`.
+    pub fn dump_raw_payloads_to_dir<P: AsRef<Path>>(&self, output_dir: P) -> Result<()> {
+        crate::writer::dump_archive_raw_payloads_to_dir(self, output_dir)
     }
 
     /// Parallel extraction of multiple entries.
@@ -1163,6 +1223,27 @@ impl P4kArchive {
             )));
         }
         Ok(Some(payload))
+    }
+
+    fn raw_payload_slice<'a>(&'a self, entry: &P4kEntryRef<'_>) -> Result<&'a [u8]> {
+        match self.version {
+            P4kVersion::V1 => Ok(self
+                .payload_slice_by_local_header(
+                    entry.name,
+                    entry.local_header_offset,
+                    entry.compressed_size,
+                    entry.uncompressed_size,
+                    entry.compression_method,
+                    entry.crc32,
+                    entry.last_mod_file_time,
+                    entry.last_mod_file_date,
+                    entry.sha256,
+                )?
+                .2),
+            P4kVersion::V2 => {
+                self.payload_slice_by_data_offset(entry.local_header_offset, entry.compressed_size)
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4117,6 +4198,35 @@ mod tests {
 
         drop(archive);
         drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn payload_offset_resolves_v1_unknown_placement_with_sha256_fallback() {
+        let path = temp_archive_path("svarog_p4k_payload_offset_unknown_v1.p4k");
+        let payload = b"payload selected by raw sha";
+        let mut builder = P4kBuilder::with_options(P4kWriterOptions {
+            compression: CompressionMethod::Store,
+            ..Default::default()
+        });
+        builder
+            .add_bytes("Data/unknown-placement.bin", payload)
+            .unwrap();
+        builder.write_v1_to_file(&path).unwrap();
+
+        let mut archive = P4kArchive::open(&path).unwrap();
+        let expected_payload_offset = archive.known_payload_offset(&archive.get(0).unwrap());
+        archive.v1_payload_placement = V1PayloadPlacement::Unknown;
+        let entry = archive.entry_ref(&archive.entries[0]);
+
+        assert_eq!(archive.known_payload_offset(&entry), None);
+        assert_eq!(
+            archive.payload_offset(&entry).unwrap(),
+            expected_payload_offset.unwrap()
+        );
+        assert_eq!(archive.read(&entry).unwrap(), payload);
+
+        drop(archive);
         let _ = std::fs::remove_file(path);
     }
 
