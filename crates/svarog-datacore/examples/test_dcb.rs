@@ -2,7 +2,7 @@ use svarog_datacore::{DataCoreBuilder, DataCoreDatabase, Query};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading Game2.dcb...");
-    let db = DataCoreDatabase::open("/media/null/ares/scd/Data/Game2.dcb")?;
+    let db = DataCoreDatabase::open("Game2.dcb")?;
 
     println!("\n=== Database Stats ===");
     println!("Structs: {}", db.struct_definitions().len());

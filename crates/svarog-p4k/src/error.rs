@@ -37,6 +37,38 @@ pub enum Error {
     #[error("unsupported version: {0}")]
     UnsupportedVersion(u16),
 
+    /// V2 EOCDR was found but its internal layout is inconsistent.
+    #[error("malformed P4K v2 EOCDR: {0}")]
+    MalformedV2Eocdr(String),
+
+    /// V2 CDR contains an entry whose name offset / data offset is
+    /// outside the bounds of the archive.
+    #[error("malformed P4K v2 CDR entry: {0}")]
+    MalformedV2Entry(String),
+
+    /// V1 install block is missing or inconsistent with the CDR.
+    #[error("malformed P4K v1 install block: {0}")]
+    MalformedV1InstallBlock(String),
+
+    /// V1 CDR entry is internally inconsistent.
+    #[error("malformed P4K v1 CDR entry: {0}")]
+    MalformedV1Entry(String),
+
+    /// P4K subarchive trailer or CDR metadata is inconsistent.
+    #[error("malformed P4K subarchive: {0}")]
+    MalformedSubArchive(String),
+
+    /// Entry data CRC does not match metadata.
+    #[error("CRC32 mismatch: expected {expected:#010x}, got {actual:#010x}")]
+    CrcMismatch { expected: u32, actual: u32 },
+
+    /// Entry raw payload SHA-256 does not match metadata.
+    #[error("SHA-256 mismatch: expected {expected:?}, got {actual:?}")]
+    Sha256Mismatch {
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
+
     /// Decompression error.
     #[error("decompression error: {0}")]
     Decompression(String),
@@ -44,6 +76,10 @@ pub enum Error {
     /// Decryption error.
     #[error("decryption error: {0}")]
     Decryption(String),
+
+    /// Encryption error.
+    #[error("encryption error: {0}")]
+    Encryption(String),
 
     /// Entry not found.
     #[error("entry not found: {0}")]

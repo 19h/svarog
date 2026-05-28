@@ -203,7 +203,7 @@ impl<'a> BinaryReader<'a> {
         let null_pos = remaining
             .iter()
             .position(|&b| b == 0)
-            .ok_or_else(|| Error::MissingNullTerminator)?;
+            .ok_or(Error::MissingNullTerminator)?;
 
         let string_bytes = &remaining[..null_pos];
         self.position = start + null_pos + 1; // Skip the null terminator

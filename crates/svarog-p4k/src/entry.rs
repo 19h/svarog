@@ -25,7 +25,7 @@ pub struct P4kEntry {
     local_header_offset: u64,
     /// DOS date/time of last modification.
     dos_datetime: u32,
-    /// CRC32 checksum of uncompressed data.
+    /// CIG CRC32C checksum of uncompressed data.
     crc32: u32,
 }
 
@@ -90,10 +90,20 @@ impl P4kEntry {
         self.local_header_offset
     }
 
-    /// Get the CRC32 checksum.
+    /// Get the CIG CRC32C checksum.
     #[inline]
     pub fn crc32(&self) -> u32 {
         self.crc32
+    }
+
+    #[inline]
+    pub(crate) fn last_mod_file_time(&self) -> u16 {
+        self.dos_datetime as u16
+    }
+
+    #[inline]
+    pub(crate) fn last_mod_file_date(&self) -> u16 {
+        (self.dos_datetime >> 16) as u16
     }
 
     /// Get the last modification time as a SystemTime.
@@ -133,14 +143,19 @@ impl P4kEntry {
 /// - Date: bits 16-20 = day, bits 21-24 = month, bits 25-31 = year-1980
 fn dos_datetime_to_system_time(datetime: u32) -> Option<SystemTime> {
     let year = 1980 + ((datetime >> 25) & 0x7F) as i32;
-    let month = ((datetime >> 21) & 0x0F) as u32;
-    let day = ((datetime >> 16) & 0x1F) as u32;
-    let hour = ((datetime >> 11) & 0x1F) as u32;
-    let minute = ((datetime >> 5) & 0x3F) as u32;
-    let second = ((datetime & 0x1F) * 2) as u32;
+    let month = (datetime >> 21) & 0x0F;
+    let day = (datetime >> 16) & 0x1F;
+    let hour = (datetime >> 11) & 0x1F;
+    let minute = (datetime >> 5) & 0x3F;
+    let second = (datetime & 0x1F) * 2;
 
     // Basic validation
-    if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59 {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
         return None;
     }
 

@@ -23,6 +23,7 @@ rayon = { workspace = true, optional = true }
 crossbeam-channel = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 memchr.workspace = true
+sha2.workspace = true
 
 [features]
 default = []

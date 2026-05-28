@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test 3: Load existing DCB and create builder from it
     println!("\n=== Test 3: Load Game2.dcb into builder ===");
-    let large_db = DataCoreDatabase::open("/media/null/ares/scd/Data/Game2.dcb")?;
+    let large_db = DataCoreDatabase::open("Game2.dcb")?;
     println!(
         "Original: {} structs, {} records",
         large_db.struct_definitions().len(),

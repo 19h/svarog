@@ -2,24 +2,58 @@
 //!
 //! This is the main entry point for the Svarog command-line application.
 
-use std::collections::HashMap;
-use std::fs;
-use std::io::{Cursor, Read};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
+use serde_json::json;
+use walkdir::WalkDir;
 
+use svarog::cryxml::{CryXmlAttribute, CryXmlHeader, CryXmlNode};
 use svarog::prelude::*;
+
+const CRYXML_MAGIC: &[u8; 8] = b"CryXmlB\0";
+const CRYXML_HEADER_SIZE: usize = std::mem::size_of::<CryXmlHeader>();
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliP4kCompression {
+    Store,
+    Deflate,
+    DeflateZlib,
+    ZstdDeprecated,
+    Zstd,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliP4kVersion {
+    V1,
+    V2,
+}
+
+impl From<CliP4kCompression> for svarog::p4k::zip::CompressionMethod {
+    fn from(value: CliP4kCompression) -> Self {
+        match value {
+            CliP4kCompression::Store => Self::Store,
+            CliP4kCompression::Deflate => Self::Deflate,
+            CliP4kCompression::DeflateZlib => Self::DeflateZlib,
+            CliP4kCompression::ZstdDeprecated => Self::ZstdDeprecated,
+            CliP4kCompression::Zstd => Self::Zstd,
+        }
+    }
+}
 
 /// Progress stage for detailed visualization
 #[derive(Clone, Copy)]
 enum Stage {
     P4kExtract,
+    P4kVerify,
     SocpakExpand,
     CryXmlDecode,
     DcbExport,
@@ -29,6 +63,7 @@ impl Stage {
     fn prefix(self) -> &'static str {
         match self {
             Stage::P4kExtract => "P4K",
+            Stage::P4kVerify => "VERIFY",
             Stage::SocpakExpand => "SOCPAK",
             Stage::CryXmlDecode => "CryXML",
             Stage::DcbExport => "DCB",
@@ -38,6 +73,7 @@ impl Stage {
     fn color(self) -> &'static str {
         match self {
             Stage::P4kExtract => "cyan",
+            Stage::P4kVerify => "red",
             Stage::SocpakExpand => "yellow",
             Stage::CryXmlDecode => "magenta",
             Stage::DcbExport => "green",
@@ -91,11 +127,6 @@ fn try_decode_cryxml_inplace(path: &Path) -> Result<bool> {
     fs::write(path, xml)?;
 
     Ok(true)
-}
-
-/// Check if data looks like CryXML (first 8 bytes are "CryXmlB\0")
-fn is_cryxml_data(data: &[u8]) -> bool {
-    CryXml::is_cryxml(data)
 }
 
 /// Svarog - Star Citizen game file extraction tool
@@ -157,6 +188,94 @@ enum Commands {
         /// Show detailed information
         #[arg(short, long)]
         detailed: bool,
+
+        /// Emit archive and entry metadata as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Dump every file from a P4K archive without extra post-processing
+    P4kDump {
+        /// Path to the P4K file
+        #[arg(short, long, env = "INPUT_P4K")]
+        p4k: PathBuf,
+
+        /// Output directory
+        #[arg(short, long, env = "OUTPUT_FOLDER")]
+        output: PathBuf,
+
+        /// Number of parallel workers (0 = auto)
+        #[arg(long, short = 'j', default_value = "0")]
+        parallel: usize,
+    },
+
+    /// Verify P4K raw payload SHA-256 and decoded CRC32C metadata
+    P4kVerify {
+        /// Path to the P4K file
+        #[arg(short, long, env = "INPUT_P4K")]
+        p4k: PathBuf,
+
+        /// Verify only raw compressed/encrypted payload SHA-256 metadata
+        #[arg(long)]
+        raw_sha_only: bool,
+    },
+
+    /// Create a P4K archive from a directory
+    P4kCreate {
+        /// Input directory to pack
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output P4K file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Compression method for file payloads
+        #[arg(long, value_enum, default_value = "zstd")]
+        compression: CliP4kCompression,
+
+        /// P4K format version to write
+        #[arg(long, value_enum, default_value = "v2")]
+        version: CliP4kVersion,
+
+        /// Physical sector size recorded in the archive
+        #[arg(long, default_value = "4096")]
+        sector_size: u64,
+
+        /// Zstandard level when --compression=zstd
+        #[arg(long, default_value = "1")]
+        zstd_level: i32,
+
+        /// Encrypt payloads with the P4K AES-CBC scheme
+        #[arg(long)]
+        encrypt: bool,
+
+        /// Hex manifest digest(s) for the v2 EOCDR: 64 hex chars for the first SHA-256, or 128 for both stored digests
+        #[arg(long)]
+        manifest_sha256: Option<String>,
+
+        /// Number of parallel workers for file hashing/compression (0 = auto)
+        #[arg(long, short = 'j', default_value = "0")]
+        parallel: usize,
+    },
+
+    /// Convert a P4K v1 archive to P4K v2
+    P4kConvertV2 {
+        /// Input P4K v1 file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output P4K v2 file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Physical sector size recorded in the v2 EOCDR
+        #[arg(long, default_value = "4096")]
+        sector_size: u64,
+
+        /// Hex manifest digest(s) for the v2 EOCDR: 64 hex chars for the first SHA-256, or 128 for both stored digests
+        #[arg(long)]
+        manifest_sha256: Option<String>,
     },
 
     /// Convert a CryXmlB file to XML
@@ -325,8 +444,50 @@ fn main() -> Result<()> {
             p4k,
             filter,
             detailed,
+            json,
         } => {
-            cmd_p4k_list(&p4k, filter.as_deref(), detailed)?;
+            cmd_p4k_list(&p4k, filter.as_deref(), detailed, json)?;
+        }
+        Commands::P4kDump {
+            p4k,
+            output,
+            parallel,
+        } => {
+            cmd_p4k_dump(&p4k, &output, parallel)?;
+        }
+        Commands::P4kVerify { p4k, raw_sha_only } => {
+            cmd_p4k_verify(&p4k, raw_sha_only)?;
+        }
+        Commands::P4kCreate {
+            input,
+            output,
+            compression,
+            version,
+            sector_size,
+            zstd_level,
+            encrypt,
+            manifest_sha256,
+            parallel,
+        } => {
+            cmd_p4k_create(
+                &input,
+                &output,
+                compression,
+                version,
+                sector_size,
+                zstd_level,
+                encrypt,
+                manifest_sha256.as_deref(),
+                parallel,
+            )?;
+        }
+        Commands::P4kConvertV2 {
+            input,
+            output,
+            sector_size,
+            manifest_sha256,
+        } => {
+            cmd_p4k_convert_v2(&input, &output, sector_size, manifest_sha256.as_deref())?;
         }
         Commands::CryxmlConvert { input, output } => {
             cmd_cryxml_convert(&input, &output)?;
@@ -493,16 +654,113 @@ struct SocpakExtractionResult {
     cryxml_decoded: usize,
 }
 
+struct P4kExtractionTask {
+    index: usize,
+    entry_index: usize,
+    name: String,
+    output_path: PathBuf,
+    kind: P4kExtractionKind,
+}
+
+enum P4kExtractionKind {
+    File,
+    Socpak { dir: PathBuf },
+}
+
+struct PrefixCaptureWriter<W> {
+    inner: W,
+    prefix: [u8; 8],
+    prefix_len: usize,
+}
+
+impl<W> PrefixCaptureWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            prefix: [0; 8],
+            prefix_len: 0,
+        }
+    }
+
+    fn captured_prefix(&self) -> &[u8] {
+        &self.prefix[..self.prefix_len]
+    }
+}
+
+impl<W: Write> Write for PrefixCaptureWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        if self.prefix_len < self.prefix.len() {
+            let capture_len = (self.prefix.len() - self.prefix_len).min(written);
+            let start = self.prefix_len;
+            let end = start + capture_len;
+            self.prefix[start..end].copy_from_slice(&buf[..capture_len]);
+            self.prefix_len = end;
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn cryxml_declared_min_len(header: &[u8; CRYXML_HEADER_SIZE]) -> Option<usize> {
+    let read_u32 = |offset: usize| {
+        let bytes = header.get(offset..offset + 4)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    };
+
+    let node_table_position = read_u32(4)? as usize;
+    let node_count = read_u32(8)? as usize;
+    let attribute_table_position = read_u32(12)? as usize;
+    let attribute_count = read_u32(16)? as usize;
+    let child_table_position = read_u32(20)? as usize;
+    let child_count = read_u32(24)? as usize;
+    let string_data_position = read_u32(28)? as usize;
+    let string_data_size = read_u32(32)? as usize;
+
+    let node_end = node_count
+        .checked_mul(std::mem::size_of::<CryXmlNode>())?
+        .checked_add(node_table_position)?;
+    let attribute_end = attribute_count
+        .checked_mul(std::mem::size_of::<CryXmlAttribute>())?
+        .checked_add(attribute_table_position)?;
+    let child_end = child_count
+        .checked_mul(4)?
+        .checked_add(child_table_position)?;
+    let string_end = string_data_size.checked_add(string_data_position)?;
+
+    Some(
+        CRYXML_MAGIC
+            .len()
+            .checked_add(CRYXML_HEADER_SIZE)?
+            .max(node_end)
+            .max(attribute_end)
+            .max(child_end)
+            .max(string_end),
+    )
+}
+
+fn cryxml_header_fits_member(header: &[u8; CRYXML_HEADER_SIZE], member_size: u64) -> bool {
+    let Ok(member_size) = usize::try_from(member_size) else {
+        return false;
+    };
+    cryxml_declared_min_len(header).is_some_and(|declared_min| declared_min <= member_size)
+}
+
 /// Extract a SOCPAK (which is just a ZIP file) to a directory.
 /// Also decodes any CryXML files found inside.
-fn extract_socpak(
-    data: &[u8],
+fn extract_socpak<R>(
+    reader: R,
     output_dir: &Path,
     pb: Option<&ProgressBar>,
-) -> Result<SocpakExtractionResult> {
-    let cursor = Cursor::new(data);
+) -> Result<SocpakExtractionResult>
+where
+    R: Read + Seek,
+{
     let mut archive =
-        zip::ZipArchive::new(cursor).context("Failed to open SOCPAK as ZIP archive")?;
+        zip::ZipArchive::new(reader).context("Failed to open SOCPAK as ZIP archive")?;
 
     let mut extracted = 0;
     let mut cryxml_decoded = 0;
@@ -522,11 +780,52 @@ fn extract_socpak(
             fs::create_dir_all(parent)?;
         }
 
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents)?;
+        let mut prefix = [0u8; 8];
+        let mut prefix_len = 0usize;
+        while prefix_len < prefix.len() {
+            let read = file.read(&mut prefix[prefix_len..])?;
+            if read == 0 {
+                break;
+            }
+            prefix_len += read;
+        }
 
-        // Check if this is a CryXML file and decode it
-        if is_cryxml_data(&contents) {
+        // Check if this is a CryXML file and decode it. Non-CryXML
+        // SOCPAK members stream directly to disk instead of first
+        // materializing the full member in memory.
+        if prefix_len == CRYXML_MAGIC.len() && prefix == *CRYXML_MAGIC {
+            let mut header = [0u8; CRYXML_HEADER_SIZE];
+            let mut header_len = 0usize;
+            while header_len < header.len() {
+                let read = file.read(&mut header[header_len..])?;
+                if read == 0 {
+                    break;
+                }
+                header_len += read;
+            }
+
+            if header_len != CRYXML_HEADER_SIZE || !cryxml_header_fits_member(&header, file.size())
+            {
+                let output = File::create(&output_path)?;
+                let mut output = BufWriter::with_capacity(1024 * 1024, output);
+                output.write_all(&prefix)?;
+                output.write_all(&header[..header_len])?;
+                std::io::copy(&mut file, &mut output)?;
+                output.flush()?;
+                extracted += 1;
+                continue;
+            }
+
+            let capacity = usize::try_from(file.size()).unwrap_or(
+                CRYXML_MAGIC
+                    .len()
+                    .saturating_add(CRYXML_HEADER_SIZE)
+                    .saturating_add(file.size().min(usize::MAX as u64) as usize),
+            );
+            let mut contents = Vec::with_capacity(capacity);
+            contents.extend_from_slice(&prefix[..prefix_len]);
+            contents.extend_from_slice(&header);
+            file.read_to_end(&mut contents)?;
             if let Some(pb) = pb {
                 set_progress_message(pb, Stage::CryXmlDecode, &name);
             }
@@ -544,9 +843,15 @@ fn extract_socpak(
                     // Fall through to write raw contents
                 }
             }
-        }
 
-        fs::write(&output_path, contents)?;
+            fs::write(&output_path, &contents)?;
+        } else {
+            let output = File::create(&output_path)?;
+            let mut output = BufWriter::with_capacity(1024 * 1024, output);
+            output.write_all(&prefix[..prefix_len])?;
+            std::io::copy(&mut file, &mut output)?;
+            output.flush()?;
+        }
         extracted += 1;
     }
 
@@ -554,6 +859,147 @@ fn extract_socpak(
         files_extracted: extracted,
         cryxml_decoded,
     })
+}
+
+fn process_p4k_extraction_task(
+    archive: &P4kArchive,
+    task: &P4kExtractionTask,
+    pb: &ProgressBar,
+    extracted: &AtomicU64,
+    socpak_expanded: &AtomicU64,
+    cryxml_decoded: &AtomicU64,
+    errors: &AtomicU64,
+) {
+    if task.index % 1024 == 0 {
+        set_progress_message(pb, Stage::P4kExtract, &task.name);
+    }
+
+    match &task.kind {
+        P4kExtractionKind::Socpak { dir } => {
+            let write_result = (|| -> Result<()> {
+                let file = File::create(&task.output_path)?;
+                let mut output = BufWriter::with_capacity(1024 * 1024, file);
+                archive.extract_index_to_writer(task.entry_index, &mut output)?;
+                output.flush()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                eprintln!("Failed to read {}: {}", task.name, e);
+                errors.fetch_add(1, Ordering::Relaxed);
+                pb.inc(1);
+                return;
+            }
+
+            let socpak = match File::open(&task.output_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("Failed to open extracted SOCPAK {}: {}", task.name, e);
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    pb.inc(1);
+                    return;
+                }
+            };
+
+            if task.index % 1024 == 0 {
+                set_progress_message(pb, Stage::SocpakExpand, &task.name);
+            }
+
+            match extract_socpak(socpak, dir, Some(pb)) {
+                Ok(result) => {
+                    let _ = fs::remove_file(&task.output_path);
+                    socpak_expanded.fetch_add(result.files_extracted as u64, Ordering::Relaxed);
+                    cryxml_decoded.fetch_add(result.cryxml_decoded as u64, Ordering::Relaxed);
+                    extracted.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    eprintln!("Failed to extract SOCPAK {}: {}", task.name, e);
+                    extracted.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        P4kExtractionKind::File => {
+            let write_result = (|| -> Result<bool> {
+                let file = File::create(&task.output_path)?;
+                let writer = BufWriter::with_capacity(1024 * 1024, file);
+                let mut output = PrefixCaptureWriter::new(writer);
+                archive.extract_index_to_writer(task.entry_index, &mut output)?;
+                output.flush()?;
+                Ok(output.captured_prefix() == CRYXML_MAGIC)
+            })();
+
+            match write_result {
+                Ok(true) => {
+                    if try_decode_cryxml_inplace(&task.output_path).unwrap_or(false) {
+                        cryxml_decoded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    extracted.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(false) => {
+                    extracted.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    eprintln!("Failed to extract {}: {}", task.name, e);
+                    errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    pb.inc(1);
+}
+
+fn prepare_p4k_extraction_parent_dirs(tasks: &[P4kExtractionTask]) -> Result<()> {
+    let mut parent_dirs = HashSet::with_capacity(tasks.len());
+    for task in tasks {
+        if let Some(parent) = task.output_path.parent() {
+            parent_dirs.insert(parent.to_path_buf());
+        }
+    }
+    for dir in parent_dirs {
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create directory {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn run_with_rayon_threads<T, F>(workers: usize, f: F) -> Result<T>
+where
+    T: Send,
+    F: FnOnce() -> Result<T> + Send,
+{
+    if workers == 0 {
+        return f();
+    }
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .context("Failed to build Rayon worker pool")?
+        .install(f)
+}
+
+fn has_parallel_output_conflict(tasks: &[P4kExtractionTask]) -> bool {
+    let socpak_dirs: Vec<_> = tasks
+        .iter()
+        .filter_map(|task| match &task.kind {
+            P4kExtractionKind::Socpak { dir } => Some(dir),
+            P4kExtractionKind::File => None,
+        })
+        .collect();
+
+    for task in tasks {
+        for dir in &socpak_dirs {
+            if matches!(&task.kind, P4kExtractionKind::Socpak { dir: task_dir } if task_dir == *dir)
+            {
+                continue;
+            }
+            if task.output_path.starts_with(dir) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if a file is an undecoded CryXML file by reading its magic bytes.
@@ -570,7 +1016,7 @@ fn check_and_decode_cryxml(path: &Path) -> bool {
         return false;
     }
 
-    if &magic != b"CryXmlB\0" {
+    if &magic != CRYXML_MAGIC {
         return false;
     }
 
@@ -626,15 +1072,19 @@ fn should_skip_file(output_path: &Path, expected_size: u64) -> bool {
     }
 }
 
+fn ends_with_ascii_ignore_case(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
 /// Check if a directory contains any files (recursively).
 /// Returns false for empty directories or directories containing only empty subdirectories.
 fn has_any_files(dir: &Path) -> bool {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                return true;
-            } else if path.is_dir() && has_any_files(&path) {
+            if path.is_file() || (path.is_dir() && has_any_files(&path)) {
                 return true;
             }
         }
@@ -642,6 +1092,7 @@ fn has_any_files(dir: &Path) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_p4k_extract(
     p4k_path: &PathBuf,
     output: &PathBuf,
@@ -650,7 +1101,7 @@ fn cmd_p4k_extract(
     incremental: bool,
     extract_dcb: bool,
     expand_socpak: bool,
-    _parallel: usize,
+    parallel: usize,
 ) -> Result<()> {
     println!("Opening P4K archive: {}", p4k_path.display());
 
@@ -672,75 +1123,46 @@ fn cmd_p4k_extract(
         None
     };
 
-    // Collect matching indices
-    let entries: Vec<_> = if let Some(ref re) = regex_filter {
-        archive
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| re.is_match(e.name))
-            .map(|(i, e)| (i, e.name.to_string(), e.uncompressed_size))
-            .collect()
-    } else if let Some(pattern) = filter {
-        archive
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| glob_match(pattern, e.name))
-            .map(|(i, e)| (i, e.name.to_string(), e.uncompressed_size))
-            .collect()
-    } else {
-        archive
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (i, e.name.to_string(), e.uncompressed_size))
-            .collect()
-    };
-
-    println!("Extracting {} entries from P4K...", entries.len());
-
-    // Find all DCB entries if extraction is requested
-    let dcb_entries: Vec<(usize, String)> = if extract_dcb {
-        archive
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.name.to_lowercase().ends_with(".dcb"))
-            .map(|(i, e)| (i, e.name.to_string()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    if !dcb_entries.is_empty() {
-        println!(
-            "Found {} DCB file(s) - will extract and process DataCore",
-            dcb_entries.len()
-        );
-    }
-
     // Track ALL SOCPAK directories for CryXML post-processing check
     let mut all_socpak_dirs: Vec<PathBuf> = Vec::new();
 
-    let pb = create_progress_bar(entries.len() as u64, Stage::P4kExtract);
-
     fs::create_dir_all(output)?;
-
-    // Statistics
-    let extracted = AtomicU64::new(0);
-    let skipped = AtomicU64::new(0);
-    let socpak_expanded = AtomicU64::new(0);
-    let cryxml_decoded = AtomicU64::new(0);
-    let errors = AtomicU64::new(0);
 
     // Path mapper for case-insensitive merging
     let path_mapper = CaseInsensitivePathMapper::new();
 
-    let start = Instant::now();
+    let mut tasks = Vec::new();
+    let mut target_paths = HashSet::new();
+    let mut dcb_entries = Vec::new();
+    let mut has_duplicate_output = false;
+    let mut matched_entries = 0usize;
+    let mut planned_skipped = 0u64;
+    let mut planned_cryxml_decoded = 0u64;
 
-    for (idx, name, size) in &entries {
-        let name_normalized = name.replace('\\', "/");
+    for (idx, entry) in archive.iter().enumerate() {
+        if extract_dcb && ends_with_ascii_ignore_case(entry.name, ".dcb") {
+            dcb_entries.push((idx, entry.name.to_string()));
+        }
+
+        let matches_filter = if let Some(ref re) = regex_filter {
+            re.is_match(entry.name)
+        } else if let Some(pattern) = filter {
+            glob_match(pattern, entry.name)
+        } else {
+            true
+        };
+        if !matches_filter {
+            continue;
+        }
+
+        let task_index = matched_entries;
+        matched_entries += 1;
+
+        let name_normalized = entry.name.replace('\\', "/");
         let output_path = path_mapper.resolve(output, &name_normalized);
 
         // Check if this is a SOCPAK file
-        let is_socpak = expand_socpak && name_normalized.to_lowercase().ends_with(".socpak");
+        let is_socpak = expand_socpak && ends_with_ascii_ignore_case(&name_normalized, ".socpak");
 
         // For SOCPAK files, we check if the extracted directory exists
         let socpak_dir = if is_socpak {
@@ -772,11 +1194,11 @@ fn cmd_p4k_extract(
                 true
             }
         } else if incremental {
-            let dominated = should_skip_file(&output_path, *size);
+            let dominated = should_skip_file(&output_path, entry.uncompressed_size);
             if dominated {
                 // File exists with matching size - but check if it's undecoded CryXML
                 if check_and_decode_cryxml(&output_path) {
-                    cryxml_decoded.fetch_add(1, Ordering::Relaxed);
+                    planned_cryxml_decoded += 1;
                 }
             }
             !dominated
@@ -785,85 +1207,87 @@ fn cmd_p4k_extract(
         };
 
         if !should_extract {
-            skipped.fetch_add(1, Ordering::Relaxed);
-            pb.inc(1);
+            planned_skipped += 1;
             continue;
         }
 
-        // Update progress with current file
-        set_progress_message(&pb, Stage::P4kExtract, &name_normalized);
-
-        // Create parent directories
-        if let Some(parent) = output_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!("Failed to create directory {}: {}", parent.display(), e);
-                errors.fetch_add(1, Ordering::Relaxed);
-                pb.inc(1);
-                continue;
-            }
+        if !target_paths.insert(output_path.clone()) {
+            has_duplicate_output = true;
         }
 
-        // Read entry data
-        let data = match archive.read_index(*idx) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to read {}: {}", name, e);
-                errors.fetch_add(1, Ordering::Relaxed);
-                pb.inc(1);
-                continue;
-            }
-        };
-
-        if let Some(socpak_dir) = socpak_dir {
-            // Extract SOCPAK contents to a directory with the same basename
-            set_progress_message(&pb, Stage::SocpakExpand, &name_normalized);
-
-            match extract_socpak(&data, &socpak_dir, Some(&pb)) {
-                Ok(result) => {
-                    socpak_expanded.fetch_add(result.files_extracted as u64, Ordering::Relaxed);
-                    cryxml_decoded.fetch_add(result.cryxml_decoded as u64, Ordering::Relaxed);
-                    extracted.fetch_add(1, Ordering::Relaxed);
-                    // Don't write the .socpak file - we've extracted it
-                }
-                Err(e) => {
-                    eprintln!("Failed to extract SOCPAK {}: {}", name, e);
-                    // Fall back to writing the raw file
-                    if let Err(e) = fs::write(&output_path, &data) {
-                        eprintln!("Failed to write {}: {}", name, e);
-                        errors.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        extracted.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
+        let kind = if let Some(socpak_dir) = socpak_dir {
+            P4kExtractionKind::Socpak { dir: socpak_dir }
         } else {
-            // Write regular file, decoding CryXML if applicable
-            let data_to_write = if is_cryxml_data(&data) {
-                // Decode CryXML to text XML
-                set_progress_message(&pb, Stage::CryXmlDecode, &name_normalized);
-                match CryXml::parse(&data) {
-                    Ok(cryxml) => match cryxml.to_xml_string() {
-                        Ok(xml) => {
-                            cryxml_decoded.fetch_add(1, Ordering::Relaxed);
-                            xml.into_bytes()
-                        }
-                        Err(_) => data, // Fall back to raw data
-                    },
-                    Err(_) => data, // Fall back to raw data
-                }
-            } else {
-                data
-            };
+            P4kExtractionKind::File
+        };
+        tasks.push(P4kExtractionTask {
+            index: task_index,
+            entry_index: idx,
+            name: name_normalized,
+            output_path,
+            kind,
+        });
+    }
 
-            if let Err(e) = fs::write(&output_path, data_to_write) {
-                eprintln!("Failed to write {}: {}", name, e);
-                errors.fetch_add(1, Ordering::Relaxed);
-            } else {
-                extracted.fetch_add(1, Ordering::Relaxed);
-            }
+    println!("Extracting {} entries from P4K...", matched_entries);
+
+    if !dcb_entries.is_empty() {
+        println!(
+            "Found {} DCB file(s) - will extract and process DataCore",
+            dcb_entries.len()
+        );
+    }
+
+    let pb = create_progress_bar(matched_entries as u64, Stage::P4kExtract);
+    if planned_skipped > 0 {
+        pb.inc(planned_skipped);
+    }
+
+    // Statistics
+    let extracted = AtomicU64::new(0);
+    let skipped = AtomicU64::new(planned_skipped);
+    let socpak_expanded = AtomicU64::new(0);
+    let cryxml_decoded = AtomicU64::new(planned_cryxml_decoded);
+    let errors = AtomicU64::new(0);
+
+    let start = Instant::now();
+
+    let has_output_conflict = has_duplicate_output || has_parallel_output_conflict(&tasks);
+    prepare_p4k_extraction_parent_dirs(&tasks)?;
+    if has_output_conflict || parallel == 1 {
+        if has_duplicate_output && parallel != 1 {
+            eprintln!("Duplicate output paths detected; preserving archive order for extraction");
+        } else if has_output_conflict && parallel != 1 {
+            eprintln!("Overlapping output paths detected; preserving archive order for extraction");
         }
+        for task in &tasks {
+            process_p4k_extraction_task(
+                &archive,
+                task,
+                &pb,
+                &extracted,
+                &socpak_expanded,
+                &cryxml_decoded,
+                &errors,
+            );
+        }
+    } else {
+        use rayon::prelude::*;
 
-        pb.inc(1);
+        run_with_rayon_threads(parallel, || {
+            tasks.par_iter().for_each(|task| {
+                process_p4k_extraction_task(
+                    &archive,
+                    task,
+                    &pb,
+                    &extracted,
+                    &socpak_expanded,
+                    &cryxml_decoded,
+                    &errors,
+                );
+            });
+            Ok(())
+        })?;
     }
 
     pb.finish_with_message("P4K extraction complete");
@@ -1046,8 +1470,78 @@ fn cmd_p4k_extract(
     Ok(())
 }
 
-fn cmd_p4k_list(p4k_path: &PathBuf, filter: Option<&str>, detailed: bool) -> Result<()> {
+fn cmd_p4k_list(
+    p4k_path: &PathBuf,
+    filter: Option<&str>,
+    detailed: bool,
+    json_output: bool,
+) -> Result<()> {
     let archive = P4kArchive::open(p4k_path).context("Failed to open P4K archive")?;
+
+    if json_output {
+        let layout = archive.layout();
+        let entries = archive
+            .iter()
+            .filter(|entry| filter.map_or(true, |pattern| glob_match(pattern, entry.name)))
+            .map(|entry| {
+                json!({
+                    "name": entry.name,
+                    "compressed_size": entry.compressed_size,
+                    "uncompressed_size": entry.uncompressed_size,
+                    "compression_method": entry.compression_method as u16,
+                    "compression": format!("{:?}", entry.compression_method),
+                    "encrypted": entry.is_encrypted,
+                    "offset": entry.local_header_offset,
+                    "offset_kind": match archive.version() {
+                        svarog::p4k::P4kVersion::V1 => "local_header",
+                        svarog::p4k::P4kVersion::V2 => "payload",
+                    },
+                    "payload_offset": archive.known_payload_offset(&entry),
+                    "crc32": format!("{:08x}", entry.crc32),
+                    "last_mod_file_time": entry.last_mod_file_time,
+                    "last_mod_file_date": entry.last_mod_file_date,
+                    "signature": bytes_to_hex(&entry.signature),
+                    "sha256": bytes_to_hex(&entry.sha256),
+                    "bytes_already_written": entry.bytes_already_written,
+                })
+            })
+            .collect::<Vec<_>>();
+        let freelist_blocks = archive
+            .freelist_blocks()
+            .iter()
+            .map(|block| {
+                json!({
+                    "offset": block.offset,
+                    "size": block.size,
+                })
+            })
+            .collect::<Vec<_>>();
+        let document = json!({
+            "path": p4k_path,
+            "version": format!("{:?}", archive.version()),
+            "entry_count": archive.entry_count(),
+            "matched_entry_count": entries.len(),
+            "layout": {
+                "file_size": layout.file_size,
+                "actual_content_end": layout.actual_content_end,
+                "physical_sector_size": layout.physical_sector_size,
+                "cdr_offset": layout.cdr_offset,
+                "cdr_size": layout.cdr_size,
+                "name_table_offset": layout.name_table_offset,
+                "name_table_size": layout.name_table_size,
+                "end_of_payload": layout.end_of_payload,
+                "install_block_offset": layout.install_block_offset,
+                "install_block_size": layout.install_block_size,
+                "eocd_offset": layout.eocd_offset,
+                "manifest_sha256": layout.manifest_sha256.as_ref().map(|bytes| bytes_to_hex(bytes)),
+                "v1_payload_placement": archive.v1_payload_placement_kind(),
+            },
+            "freelist_blocks": freelist_blocks,
+            "entries": entries,
+        });
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        return Ok(());
+    }
 
     let mut count = 0;
     for entry in archive.iter() {
@@ -1074,6 +1568,264 @@ fn cmd_p4k_list(p4k_path: &PathBuf, filter: Option<&str>, detailed: bool) -> Res
     println!("\nTotal: {} entries", count);
 
     Ok(())
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    out
+}
+
+fn cmd_p4k_dump(p4k_path: &PathBuf, output: &PathBuf, parallel: usize) -> Result<()> {
+    println!("Dumping P4K archive: {}", p4k_path.display());
+    let archive = P4kArchive::open(p4k_path).context("Failed to open P4K archive")?;
+    println!(
+        "Version: {:?}, entries: {}",
+        archive.version(),
+        archive.entry_count()
+    );
+    run_with_rayon_threads(parallel, || {
+        archive
+            .dump_to_dir(output)
+            .context("Failed to dump P4K archive")
+    })?;
+    println!("Dumped to {}", output.display());
+    Ok(())
+}
+
+fn cmd_p4k_verify(p4k_path: &PathBuf, raw_sha_only: bool) -> Result<()> {
+    println!("Verifying P4K archive: {}", p4k_path.display());
+    let archive = P4kArchive::open(p4k_path).context("Failed to open P4K archive")?;
+    println!(
+        "Version: {:?}, entries: {}",
+        archive.version(),
+        archive.entry_count()
+    );
+
+    let pb = create_progress_bar(archive.entry_count() as u64, Stage::P4kVerify);
+    if raw_sha_only {
+        archive
+            .verify_payloads_sha256_physical_order_parallel_with_progress(|index, name| {
+                update_p4k_verify_progress(&pb, index, name);
+            })
+            .context("P4K raw payload SHA-256 check failed")?;
+    } else {
+        archive
+            .verify_integrity_parallel_with_progress(|index, name| {
+                update_p4k_verify_progress(&pb, index, name);
+            })
+            .context("P4K integrity check failed")?;
+    }
+    pb.finish_with_message("P4K verification complete");
+    println!("Verified {} entries", archive.entry_count());
+    Ok(())
+}
+
+fn update_p4k_verify_progress(pb: &ProgressBar, index: usize, name: &str) {
+    if index % 1024 == 0 {
+        set_progress_message(pb, Stage::P4kVerify, name);
+    }
+    pb.inc(1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_p4k_create(
+    input: &PathBuf,
+    output: &PathBuf,
+    compression: CliP4kCompression,
+    version: CliP4kVersion,
+    sector_size: u64,
+    zstd_level: i32,
+    encrypt: bool,
+    manifest_sha256: Option<&str>,
+    parallel: usize,
+) -> Result<()> {
+    if !input.is_dir() {
+        anyhow::bail!("Input path is not a directory: {}", input.display());
+    }
+    let options = svarog::p4k::P4kWriterOptions {
+        compression: compression.into(),
+        sector_size,
+        zstd_level,
+        manifest_sha256: parse_manifest_sha256_option(manifest_sha256)?,
+        ..Default::default()
+    };
+
+    let mut files = WalkDir::new(input)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            let path = entry.into_path();
+            let relative = path
+                .strip_prefix(input)
+                .with_context(|| format!("Failed to relativize {}", path.display()))?;
+            let archive_name = relative.to_string_lossy().replace('/', "\\");
+            let sort_key = p4k_archive_name_sort_key(&archive_name);
+            Ok((path, archive_name, sort_key))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    files.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    println!(
+        "Creating P4K {:?}: {} files, compression={:?}, encrypted={}",
+        version,
+        files.len(),
+        compression,
+        encrypt
+    );
+    let pb = create_progress_bar(files.len() as u64, Stage::P4kExtract);
+
+    let mut builder = svarog::p4k::P4kBuilder::with_options(options.clone());
+    if parallel == 1 {
+        for (index, (path, archive_name, _)) in files.iter().enumerate() {
+            if index % 1024 == 0 {
+                set_progress_message(&pb, Stage::P4kExtract, archive_name);
+            }
+            if encrypt {
+                builder
+                    .add_file_encrypted(path, archive_name)
+                    .with_context(|| format!("Failed to add {}", path.display()))?;
+            } else {
+                builder
+                    .add_file(path, archive_name)
+                    .with_context(|| format!("Failed to add {}", path.display()))?;
+            }
+            pb.inc(1);
+        }
+    } else {
+        use rayon::prelude::*;
+
+        let staged_entries: Vec<_> = run_with_rayon_threads(parallel, || {
+            files
+                .par_iter()
+                .enumerate()
+                .map(|(index, (path, archive_name, _))| {
+                    if index % 1024 == 0 {
+                        set_progress_message(&pb, Stage::P4kExtract, archive_name);
+                    }
+                    let staged = svarog::p4k::P4kBuilder::stage_file_with_options(
+                        &options,
+                        path,
+                        archive_name,
+                        encrypt,
+                    )
+                    .with_context(|| format!("Failed to add {}", path.display()));
+                    pb.inc(1);
+                    staged
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        builder.append_staged(staged_entries);
+    }
+    pb.finish_with_message("P4K create complete");
+
+    let stats = match version {
+        CliP4kVersion::V1 => builder
+            .write_v1_to_file(output)
+            .context("Failed to write P4K v1 archive")?,
+        CliP4kVersion::V2 => builder
+            .write_to_file(output)
+            .context("Failed to write P4K v2 archive")?,
+    };
+    println!(
+        "Wrote {} entries to {} ({} bytes, CDR at 0x{:X})",
+        stats.entry_count,
+        output.display(),
+        stats.file_size,
+        stats.cdr_offset
+    );
+    Ok(())
+}
+
+fn p4k_archive_name_sort_key(name: &str) -> String {
+    let mut out = Vec::with_capacity(name.len());
+    for &byte in name.as_bytes() {
+        let mut value = if byte == b'\\' { b'/' } else { byte };
+        if value.is_ascii_uppercase() {
+            value = value.to_ascii_lowercase();
+        }
+        out.push(value);
+    }
+    while out.last() == Some(&b' ') {
+        out.pop();
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn cmd_p4k_convert_v2(
+    input: &PathBuf,
+    output: &PathBuf,
+    sector_size: u64,
+    manifest_sha256: Option<&str>,
+) -> Result<()> {
+    let options = svarog::p4k::P4kWriterOptions {
+        sector_size,
+        manifest_sha256: parse_manifest_sha256_option(manifest_sha256)?,
+        ..Default::default()
+    };
+    let stats = svarog::p4k::convert_v1_to_v2(input, output, options)
+        .context("Failed to convert P4K v1 to v2")?;
+    println!(
+        "Converted {} entries to {} ({} bytes, CDR at 0x{:X})",
+        stats.entry_count,
+        output.display(),
+        stats.file_size,
+        stats.cdr_offset
+    );
+    Ok(())
+}
+
+fn parse_manifest_sha256_option(value: Option<&str>) -> Result<[u8; 64]> {
+    let Some(value) = value else {
+        return Ok([0; 64]);
+    };
+
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != ':')
+        .collect();
+    if cleaned.len() != 64 && cleaned.len() != 128 {
+        anyhow::bail!(
+            "--manifest-sha256 must contain 64 or 128 hex characters, got {}",
+            cleaned.len()
+        );
+    }
+
+    let mut out = [0u8; 64];
+    for (index, chunk) in cleaned.as_bytes().chunks_exact(2).enumerate() {
+        out[index] = parse_hex_byte(chunk).with_context(|| {
+            format!(
+                "invalid --manifest-sha256 hex byte at character {}",
+                index * 2
+            )
+        })?;
+    }
+    Ok(out)
+}
+
+fn parse_hex_byte(bytes: &[u8]) -> Result<u8> {
+    debug_assert_eq!(bytes.len(), 2);
+    let hi = parse_hex_nibble(bytes[0])?;
+    let lo = parse_hex_nibble(bytes[1])?;
+    Ok((hi << 4) | lo)
+}
+
+fn parse_hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => anyhow::bail!("not a hex digit"),
+    }
 }
 
 fn cmd_cryxml_convert(input: &PathBuf, output: &PathBuf) -> Result<()> {
@@ -1522,6 +2274,7 @@ fn load_dcb_data(path: &PathBuf) -> Result<Vec<u8>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_dcb_compare(
     dcb1: &PathBuf,
     dcb2: &PathBuf,
@@ -1681,4 +2434,114 @@ fn cmd_dcb_compare(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn prefix_capture_writer_collects_first_eight_bytes_across_writes() {
+        let mut writer = PrefixCaptureWriter::new(Vec::new());
+
+        writer.write_all(b"Cry").unwrap();
+        writer.write_all(b"XmlB\0payload").unwrap();
+
+        assert_eq!(writer.captured_prefix(), CRYXML_MAGIC);
+        assert_eq!(writer.inner, b"CryXmlB\0payload");
+    }
+
+    #[test]
+    fn cryxml_declared_min_len_uses_header_section_bounds() {
+        let mut header = [0u8; CRYXML_HEADER_SIZE];
+        header[4..8].copy_from_slice(&44u32.to_le_bytes());
+        header[8..12].copy_from_slice(&2u32.to_le_bytes());
+        header[12..16].copy_from_slice(&100u32.to_le_bytes());
+        header[16..20].copy_from_slice(&3u32.to_le_bytes());
+        header[20..24].copy_from_slice(&80u32.to_le_bytes());
+        header[24..28].copy_from_slice(&4u32.to_le_bytes());
+        header[28..32].copy_from_slice(&140u32.to_le_bytes());
+        header[32..36].copy_from_slice(&12u32.to_le_bytes());
+
+        assert_eq!(
+            cryxml_declared_min_len(&header),
+            Some(140 + 12),
+            "string table end should dominate this synthetic header"
+        );
+        assert!(cryxml_header_fits_member(&header, 152));
+        assert!(!cryxml_header_fits_member(&header, 151));
+    }
+
+    #[test]
+    fn ascii_suffix_match_avoids_case_fold_allocation() {
+        assert!(ends_with_ascii_ignore_case(
+            "Data/Textures/Pack.SOCPAK",
+            ".socpak"
+        ));
+        assert!(ends_with_ascii_ignore_case("Data/Game.DCB", ".dcb"));
+        assert!(!ends_with_ascii_ignore_case("Data/Game.dcba", ".dcb"));
+        assert!(!ends_with_ascii_ignore_case("d", ".dcb"));
+    }
+
+    #[test]
+    fn extract_socpak_streams_non_cryxml_members_after_prefix_probe() {
+        let mut zip_bytes = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut zip_bytes);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("Data/test.bin", options).unwrap();
+            zip.write_all(b"not-cryxml-payload").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let out_dir =
+            std::env::temp_dir().join(format!("svarog-socpak-stream-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out_dir);
+        let result = extract_socpak(Cursor::new(zip_bytes.get_ref()), &out_dir, None).unwrap();
+
+        assert_eq!(result.files_extracted, 1);
+        assert_eq!(result.cryxml_decoded, 0);
+        assert_eq!(
+            fs::read(out_dir.join("Data/test.bin")).unwrap(),
+            b"not-cryxml-payload"
+        );
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn extract_socpak_streams_bogus_cryxml_prefix_without_buffering_member_for_parse() {
+        let mut bogus = Vec::new();
+        bogus.extend_from_slice(CRYXML_MAGIC);
+        let mut header = [0u8; CRYXML_HEADER_SIZE];
+        header[28..32].copy_from_slice(&1_000_000u32.to_le_bytes());
+        header[32..36].copy_from_slice(&64u32.to_le_bytes());
+        bogus.extend_from_slice(&header);
+        bogus.extend_from_slice(b"raw payload after bogus header");
+
+        let mut zip_bytes = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut zip_bytes);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("Data/bogus.xml", options).unwrap();
+            zip.write_all(&bogus).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "svarog-socpak-bogus-cryxml-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&out_dir);
+        let result = extract_socpak(Cursor::new(zip_bytes.get_ref()), &out_dir, None).unwrap();
+
+        assert_eq!(result.files_extracted, 1);
+        assert_eq!(result.cryxml_decoded, 0);
+        assert_eq!(fs::read(out_dir.join("Data/bogus.xml")).unwrap(), bogus);
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
 }

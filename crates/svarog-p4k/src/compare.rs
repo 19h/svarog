@@ -20,9 +20,9 @@ pub struct FileComparisonResult {
     pub size_old: Option<u64>,
     /// Size in the new archive (None if removed)
     pub size_new: Option<u64>,
-    /// CRC32 in the old archive (None if added)
+    /// CIG CRC32C in the old archive (None if added)
     pub crc_old: Option<u32>,
-    /// CRC32 in the new archive (None if removed)
+    /// CIG CRC32C in the new archive (None if removed)
     pub crc_new: Option<u32>,
 }
 
@@ -56,7 +56,7 @@ impl P4kComparisonResult {
 /// Compare two P4K archives and return the differences.
 ///
 /// Files are matched by path (case-insensitive). Modified files are detected
-/// by comparing CRC32 checksums.
+/// by comparing CIG CRC32C checksums.
 ///
 /// # Arguments
 ///
@@ -127,7 +127,7 @@ pub fn compare_archives(old_archive: &P4kArchive, new_archive: &P4kArchive) -> P
         });
     }
 
-    // Files in both - check if modified (by CRC32)
+    // Files in both - check if modified (by CIG CRC32C)
     for key in old_keys.intersection(&new_keys) {
         let old_info = &old_entries[key];
         let new_info = &new_entries[key];
@@ -145,9 +145,9 @@ pub fn compare_archives(old_archive: &P4kArchive, new_archive: &P4kArchive) -> P
     }
 
     // Sort results by path for consistent output
-    added.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
-    removed.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
-    modified.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    added.sort_by_key(|a| a.path.to_lowercase());
+    removed.sort_by_key(|a| a.path.to_lowercase());
+    modified.sort_by_key(|a| a.path.to_lowercase());
 
     P4kComparisonResult {
         added,

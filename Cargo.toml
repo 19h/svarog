@@ -49,6 +49,8 @@ cipher = "0.4"
 
 # Hashing
 crc32c = "0.6"
+crc32fast = "1.4"
+sha2 = { version = "0.10", features = ["asm"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -100,6 +102,7 @@ path = "src/main.rs"
 
 [dependencies]
 svarog.workspace = true
+svarog-p4k = { workspace = true, features = ["parallel"] }
 svarog-common.workspace = true
 clap.workspace = true
 indicatif.workspace = true
@@ -108,6 +111,7 @@ rayon.workspace = true
 zip.workspace = true
 walkdir = "2.5"
 regex.workspace = true
+serde_json.workspace = true
 
 [profile.release]
 lto = true

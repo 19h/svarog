@@ -16,7 +16,7 @@ pub struct LocalFileHeader {
     pub compression_method: u16,
     /// File last modification time and date (DOS format)
     pub last_modified: u32,
-    /// CRC-32 of uncompressed data
+    /// CIG CRC32C of uncompressed data
     pub crc32: u32,
     /// Compressed size
     pub compressed_size: u32,

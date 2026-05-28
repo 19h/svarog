@@ -4,22 +4,31 @@ A high-performance Rust library and CLI for extracting and parsing Star Citizen 
 
 ## Features
 
-- **P4K Archive Extraction** - Read Star Citizen's ZIP64 archives with AES encryption and Zstandard compression
+- **P4K Archive Read/Write** - Full support for both legacy ZIP64-based v1 and modern v2 ("JiJi") archive formats
+  - Reader auto-detects v1 (ZIP64 + `CI` EOCD comment) and v2 (`0xAF` EOCDR, `JiJi` magic) layouts
+  - Writer (`P4kBuilder`) for creating v1 or v2 archives with Store, raw DEFLATE, zlib-wrapped DEFLATE, and Zstandard compression
+  - AES-128-CBC encryption support (read and write)
+  - Fast v1 → v2 conversion preserving payloads, freelists, install progress, and metadata
+  - Optional 64-byte manifest digest pass-through for the v2 EOCDR
   - Automatic SOCPAK expansion (extracts nested ZIP archives inline)
   - Automatic CryXML decoding during extraction
   - Incremental extraction (skip unchanged files)
   - Empty directory detection and re-extraction
+  - Archive diffing with unified text diff for XML/text files
 - **DataCore Database** - Full read/write support for `.dcb` game database files
+  - Versions 5, 6, and v8 layout supported (newer Star Citizen builds)
   - High-level Query API for searching records
-  - DOM-like Instance API for property access
+  - DOM-like Instance API for property access (with lazy resolution of inline Class arrays)
   - DataCoreBuilder for creating/modifying databases
   - XML export with all properties resolved
   - C header export for structs/enums (IDA-compatible, self-contained)
+  - Database diffing across records, structs, and enums with unified diff output
 - **CryXmlB Read/Write** - Full round-trip support for binary XML files
   - Parse `.mtl`, `.cdf`, `.chrparams`, `.adb`, `.animevents`, `.bspace`, `.xml`
   - Convert to/from standard XML text
   - Programmatic construction via builder API
 - **Character File Parsing** - Read and analyze `.chf` character head files
+  - Supports newer CHF format versions
 - **DDS Mipmap Merging** - Merge split DDS texture files
 
 ## GUI Application
@@ -65,6 +74,11 @@ Pre-built binaries are available in [Releases](https://github.com/19h/svarog/rel
 - Navigation history with back/forward (mouse buttons, Alt+Left/Right)
 - Alternating row backgrounds (zebra striping) in all tree views
 - Text selection with non-copyable line numbers
+
+**Comparison Tools**
+- Diff two P4K archives or two DCB databases side-by-side
+- Unified diff for XML/text files inside P4K
+- DCB diff across records, structs, and enums
 
 ## Performance
 
@@ -119,29 +133,80 @@ cargo build --release --all-features
 ### P4K Archive Operations
 
 ```bash
-# List all files in a P4K archive
+# List all files in a P4K archive (auto-detects v1 or v2)
 svarog p4k-list -p /path/to/Data.p4k
 
-# List with size details
+# List with size, encryption flag, and other details
 svarog p4k-list -p Data.p4k --detailed
+
+# Dump archive/entry metadata as JSON: methods, offsets, CRC, SHA-256, signatures, install progress
+svarog p4k-list -p Data.p4k --json
 
 # Filter by pattern
 svarog p4k-list -p Data.p4k --filter "*.xml"
 
-# Extract all files
+# Smart extraction: SOCPAK expansion, CryXML decoding, DCB → XML, incremental
 svarog p4k-extract -p Data.p4k -o ./output
 
-# Extract with filter
+# Extract with filter (glob or regex)
 svarog p4k-extract -p Data.p4k -o ./output --filter "Data/Scripts/*.lua"
+svarog p4k-extract -p Data.p4k -o ./output --filter "Data/Ships/.*" --regex
+
+# Raw dump of every file with no post-processing
+svarog p4k-dump -p Data.p4k -o ./raw
+svarog p4k-dump -p Data.p4k -o ./raw -j 8
+
+# Verify raw payload SHA-256 and decoded CRC32C metadata
+svarog p4k-verify -p Data.p4k
+
+# Fast verification of raw compressed/encrypted payload SHA-256 only
+svarog p4k-verify -p Data.p4k --raw-sha-only
+
+# Create a P4K archive from a directory (default: v2, Zstandard)
+svarog p4k-create -i ./content -o NewArchive.p4k
+svarog p4k-create -i ./content -o NewArchive.p4k --version v1 --compression deflate
+svarog p4k-create -i ./content -o Encrypted.p4k --encrypt --compression zstd
+svarog p4k-create -i ./content -o XboxStyle.p4k --compression deflate-zlib
+
+# Convert an existing v1 archive to the v2 ("JiJi") format
+svarog p4k-convert-v2 -i Old.p4k -o New.p4k
+
+# Diff two archives (with optional unified diff for XML/text files)
+svarog p4k-compare --old Old.p4k --new New.p4k --diff
+svarog p4k-compare --old Old.p4k --new New.p4k --modified-only --filter "*.xml"
+```
+
+Opt-in real-archive validation for the P4K crate:
+
+```bash
+# Open and classify one real archive
+SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test -p svarog-p4k real_world_p4k_parses -- --nocapture
+
+# Walk a corpus directory and open every .p4k file
+SVAROG_P4K_TEST_DIR=/path/to/corpus cargo test -p svarog-p4k real_world_p4k_corpus_parses -- --nocapture
+
+# Fast raw stored payload SHA-256 verification
+SVAROG_P4K_TEST_SHA256=1 SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test --release -p svarog-p4k --features parallel real_world_p4k_parses -- --nocapture
+
+# Add full stored SHA-256 plus decoded CRC32C verification
+SVAROG_P4K_TEST_VERIFY=1 SVAROG_P4K_TEST_FILE=/path/to/Data.p4k cargo test -p svarog-p4k real_world_p4k_parses -- --nocapture
 ```
 
 ### DataCore Database Operations
 
 ```bash
-# Extract all records to XML
+# Extract all records to XML (output organized by record type)
 svarog dcb-extract -i Game.dcb -o ./datacore
 
-# The output will be organized by record type
+# Filter records by file name pattern
+svarog dcb-extract -i Game.dcb -o ./datacore --filter "Ships/*"
+
+# Export the full DataCore schema as a single C header (IDA-compatible)
+svarog dcb-schema -i Game.dcb -o datacore_types.h
+
+# Diff two DCB databases (DCB files or P4K archives containing them)
+svarog dcb-compare --old Old.dcb --new New.dcb --diff
+svarog dcb-compare --old Old.p4k --new New.p4k --scope records --modified-only
 ```
 
 ### CryXmlB Conversion
@@ -152,16 +217,14 @@ svarog cryxml-convert -i material.mtl -o material.xml
 
 # Convert XML back to CryXmlB
 svarog cryxml-create -i material.xml -o material.mtl
-
-# Convert all CryXmlB files in a directory
-svarog cryxml-convert-all -i ./extracted -o ./converted
 ```
 
 ### Character File Processing
 
 ```bash
-# Process a character file
-svarog chf-process -i character.chf -o character.json
+# Process a character file (CHF ↔ BIN, extension-driven)
+svarog chf-process -i character.chf -o character.bin
+svarog chf-process -i character.bin -o character.chf
 ```
 
 ### DDS Mipmap Merging
@@ -262,6 +325,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Example: Writing a P4K Archive
+
+```rust
+use svarog::p4k::{P4kBuilder, P4kWriterOptions};
+use svarog::p4k::zip::CompressionMethod;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut options = P4kWriterOptions::default();
+    options.compression = CompressionMethod::Zstd;
+    options.zstd_level = 1;
+
+    let mut builder = P4kBuilder::with_options(options);
+    builder.add_file("./content/material.mtl", "Data\\material.mtl")?;
+    builder.add_file_encrypted("./content/secret.bin", "Data\\secret.bin")?;
+
+    // Write a v2 ("JiJi") archive — use write_v1_to_file() for the legacy layout
+    let stats = builder.write_to_file("NewArchive.p4k")?;
+    println!("Wrote {} entries ({} bytes)", stats.entry_count, stats.file_size);
+    Ok(())
+}
+```
+
+### Example: Converting a P4K v1 Archive to v2
+
+```rust
+use svarog::p4k::{convert_v1_to_v2, P4kWriterOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let stats = convert_v1_to_v2(
+        "Legacy.p4k",
+        "Modern.p4k",
+        P4kWriterOptions::default(),
+    )?;
+    println!("Converted {} entries", stats.entry_count);
+    Ok(())
+}
+```
+
 ### Example: Exporting C Headers
 
 ```rust
@@ -318,19 +419,28 @@ let pos = simd::find_byte(0x50, &data);
 
 ### P4K Archive
 
-- ZIP64 format with custom extensions
-- AES-128-CBC encryption (zero IV)
-- Zstandard compression (method 100)
-- DEFLATE compression (method 8)
-- Custom extra fields (0x5000, 0x5002, 0x5003)
+Two on-disk layouts are supported, auto-detected by the reader:
+
+- **v1** — ZIP64-based with per-payload local file records, a 16-byte `CI` EOCD comment, and custom extra fields `0x0001`/`0x5000`/`0x5002`/`0x5003`
+- **v2** ("JiJi") — local headers removed; payloads followed by an install/freelist block, a 64 KiB-aligned `0xCC`-byte CDR, a name table, and a fixed `0xAF`-byte EOCDR ending in `version=2` + magic `JiJi`
+
+Shared properties:
+
+- AES-128-CBC encryption with zero IV, applied after the selected compression step
+- Store (method 0), raw DEFLATE (method 8), Zstandard (methods 93 and 100), and zlib-wrapped DEFLATE (method 101)
+- Hardware-accelerated AES-NI and Zstd
+- Optional 64-byte manifest SHA-256 digest stored in the v2 EOCDR
+
+See `crates/svarog-p4k/P4K_FORMAT.md` for the full decompilation-backed layout notes.
 
 ### DataCore Database (DCB)
 
-- Versions 5 and 6 supported
+- Versions 5, 6, and v8 (newer Star Citizen builds) supported
 - Contains struct definitions, properties, enums
 - Value pools for all primitive types
 - Records with GUID identifiers
 - Two string tables
+- Lazy resolution of inline Class arrays for correctness on v8 layouts
 
 ### CryXmlB
 

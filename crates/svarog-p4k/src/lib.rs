@@ -4,10 +4,13 @@
 //! to package game assets. It supports:
 //!
 //! - ZIP64 extended format for large archives (>4GB)
-//! - AES-256-CBC encryption for protected entries
+//! - AES-128-CBC encryption for protected entries
 //! - Zstandard compression (method 100)
 //! - DEFLATE compression (method 8)
 //! - Custom extra fields (0x5000, 0x5002, 0x5003)
+//!
+//! See `crates/svarog-p4k/P4K_FORMAT.md` for the dump-backed v1/v2
+//! layout notes used by this crate.
 //!
 //! # Performance Optimizations
 //!
@@ -16,7 +19,7 @@
 //! - Arena-allocated entry names (zero per-entry heap allocations)
 //! - Parallel extraction with rayon (with `parallel` feature)
 //! - Zero-copy memory-mapped file access
-//! - Optimized AES decryption with AES-NI when available
+//! - Optimized AES decryption/encryption with AES-NI when available
 //!
 //! # Example
 //!
@@ -44,10 +47,23 @@ mod decompress;
 mod entry;
 mod error;
 mod simd;
+mod subarchive;
+mod writer;
 pub mod zip;
 
-pub use archive::{P4kArchive, P4kEntryRef};
+pub use archive::{P4kArchive, P4kEntryRef, P4kVersion};
 pub use compare::{compare_archives, is_cryxml_extension, is_text_file};
 pub use compare::{FileComparisonResult, P4kComparisonResult};
+pub use crypto::signature_metadata_sha256;
 pub use entry::P4kEntry;
 pub use error::{Error, Result};
+pub use subarchive::{
+    parse_subarchive, parse_subarchive_cdr_entries, parse_subarchive_cdr_info,
+    parse_subarchive_file, parse_subarchive_from_reader, subarchive_eocdr_begin_offset,
+    subarchive_eocdr_size, validate_subarchive_eocdr, SubArchive, SubArchiveCdrEntry,
+    SubArchiveCdrInfo, SubArchiveStatus, SUBARCHIVE_EOCDR_SIZE,
+};
+pub use writer::{
+    convert_v1_to_v2, dump_archive_to_dir, P4kBuilder, P4kEntryMetadata, P4kStagedEntry,
+    P4kWriteStats, P4kWriterOptions,
+};

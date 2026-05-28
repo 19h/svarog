@@ -625,7 +625,7 @@ fn test_edge_cases() -> Result<(), Box<dyn std::error::Error>> {
 fn test_real_file_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- Test 6: Real File Roundtrip (Game2.dcb) ---");
 
-    let game_dcb_path = "/media/null/ares/scd/Data/Game2.dcb";
+    let game_dcb_path = "Game2.dcb";
 
     if !std::path::Path::new(game_dcb_path).exists() {
         println!("  SKIPPED: {} not found", game_dcb_path);

@@ -42,7 +42,7 @@ pub fn find_content_end(data: &[u8]) -> usize {
             return unsafe { find_content_end_sse2(data) };
         }
         // Fall through to scalar if no SIMD available
-        return find_content_end_scalar(data);
+        find_content_end_scalar(data)
     }
 
     #[cfg(target_arch = "aarch64")]
