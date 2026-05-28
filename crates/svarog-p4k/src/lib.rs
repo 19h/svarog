@@ -64,7 +64,7 @@ pub use subarchive::{
     SubArchiveCdrInfo, SubArchiveStatus, SUBARCHIVE_EOCDR_SIZE,
 };
 pub use writer::{
-    convert_v1_to_v2, dump_archive_raw_payloads_to_dir, dump_archive_to_dir,
-    rewrite_v2_tail_in_place, P4kBuilder, P4kEntryMetadata, P4kStagedEntry, P4kWriteStats,
-    P4kWriterOptions,
+    convert_v1_to_v2, convert_v1_to_v2_with_progress, dump_archive_raw_payloads_to_dir,
+    dump_archive_to_dir, rewrite_v2_tail_in_place, P4kBuilder, P4kConvertCopyMethod,
+    P4kConvertProgress, P4kEntryMetadata, P4kStagedEntry, P4kWriteStats, P4kWriterOptions,
 };

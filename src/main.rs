@@ -8,7 +8,7 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -54,6 +54,7 @@ impl From<CliP4kCompression> for svarog::p4k::zip::CompressionMethod {
 enum Stage {
     P4kExtract,
     P4kVerify,
+    P4kConvert,
     SocpakExpand,
     CryXmlDecode,
     DcbExport,
@@ -64,6 +65,7 @@ impl Stage {
         match self {
             Stage::P4kExtract => "P4K",
             Stage::P4kVerify => "VERIFY",
+            Stage::P4kConvert => "CONVERT",
             Stage::SocpakExpand => "SOCPAK",
             Stage::CryXmlDecode => "CryXML",
             Stage::DcbExport => "DCB",
@@ -74,6 +76,7 @@ impl Stage {
         match self {
             Stage::P4kExtract => "cyan",
             Stage::P4kVerify => "red",
+            Stage::P4kConvert => "green",
             Stage::SocpakExpand => "yellow",
             Stage::CryXmlDecode => "magenta",
             Stage::DcbExport => "green",
@@ -95,6 +98,39 @@ fn create_progress_bar(len: u64, stage: Stage) -> ProgressBar {
             .unwrap()
             .progress_chars("#>-"),
     );
+    pb
+}
+
+fn create_spinner(stage: Stage, message: impl Into<String>) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    let template = format!(
+        "{{spinner:.{}}} [{{elapsed_precise}}] {{msg}}",
+        stage.color()
+    );
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template(&template)
+            .unwrap(),
+    );
+    pb.set_message(format!("[{}] {}", stage.prefix(), message.into()));
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb
+}
+
+fn create_bytes_progress_bar(len: u64, stage: Stage, message: impl Into<String>) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    let template = format!(
+        "{{spinner:.{}}} [{{elapsed_precise}}] [{{bar:40.{}/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, eta {{eta}}) {{msg}}",
+        stage.color(),
+        stage.color()
+    );
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&template)
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    pb.set_message(format!("[{}] {}", stage.prefix(), message.into()));
     pb
 }
 
@@ -1801,8 +1837,111 @@ fn cmd_p4k_convert_v2(
         manifest_sha256: parse_manifest_sha256_option(manifest_sha256)?,
         ..Default::default()
     };
-    let stats = svarog::p4k::convert_v1_to_v2(input, output, options)
-        .context("Failed to convert P4K v1 to v2")?;
+    let mut active_pb: Option<ProgressBar> = None;
+    let stats = svarog::p4k::convert_v1_to_v2_with_progress(input, output, options, |event| {
+        use svarog::p4k::{P4kConvertCopyMethod, P4kConvertProgress};
+
+        match event {
+            P4kConvertProgress::OpeningSource => {
+                finish_progress_bar(&mut active_pb, "Starting conversion");
+                active_pb = Some(create_spinner(
+                    Stage::P4kConvert,
+                    format!("Opening {}", input.display()),
+                ));
+            }
+            P4kConvertProgress::SourceOpened {
+                entry_count,
+                source_file_size,
+            } => {
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!("Opened source: {entry_count} entries, {source_file_size} bytes"),
+                );
+            }
+            P4kConvertProgress::PlanningEntries { entry_count } => {
+                active_pb = Some(create_progress_bar(entry_count as u64, Stage::P4kConvert));
+                if let Some(pb) = &active_pb {
+                    pb.set_message("[CONVERT] Planning v2 metadata");
+                }
+            }
+            P4kConvertProgress::PlanningProgress { planned, total } => {
+                if let Some(pb) = &active_pb {
+                    pb.set_length(total as u64);
+                    pb.set_position(planned as u64);
+                }
+            }
+            P4kConvertProgress::PlanningFinished {
+                entry_count,
+                payload_bytes,
+                freelist_blocks,
+            } => {
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!(
+                        "Planned {entry_count} entries, {payload_bytes} payload bytes, {freelist_blocks} free ranges"
+                    ),
+                );
+            }
+            P4kConvertProgress::CopyStarted { bytes } => {
+                active_pb = Some(create_bytes_progress_bar(
+                    bytes,
+                    Stage::P4kConvert,
+                    "Preserving payload prefix",
+                ));
+            }
+            P4kConvertProgress::CopyProgress { copied, total } => {
+                if let Some(pb) = &active_pb {
+                    pb.set_length(total);
+                    pb.set_position(copied);
+                }
+            }
+            P4kConvertProgress::CopyFinished { bytes, method } => {
+                let method = match method {
+                    P4kConvertCopyMethod::Reflink => "reflink",
+                    P4kConvertCopyMethod::CopyFileRange => "copy_file_range",
+                    P4kConvertCopyMethod::Buffered => "buffered copy",
+                    P4kConvertCopyMethod::Empty => "no payload",
+                };
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!("Preserved {bytes} payload bytes via {method}"),
+                );
+            }
+            P4kConvertProgress::TailStarted {
+                entry_count,
+                freelist_blocks,
+            } => {
+                active_pb = Some(create_spinner(
+                    Stage::P4kConvert,
+                    format!(
+                        "Writing v2 tail for {entry_count} entries and {freelist_blocks} free ranges"
+                    ),
+                ));
+            }
+            P4kConvertProgress::TailFinished {
+                file_size,
+                cdr_offset,
+            } => {
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!("Wrote v2 tail: {file_size} bytes, CDR at 0x{cdr_offset:X}"),
+                );
+            }
+            P4kConvertProgress::Publishing => {
+                active_pb = Some(create_spinner(
+                    Stage::P4kConvert,
+                    format!("Publishing {}", output.display()),
+                ));
+            }
+            P4kConvertProgress::Finished { stats } => {
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!("Converted {} entries", stats.entry_count),
+                );
+            }
+        }
+    })
+    .context("Failed to convert P4K v1 to v2")?;
     println!(
         "Converted {} entries to {} ({} bytes, CDR at 0x{:X})",
         stats.entry_count,
@@ -1811,6 +1950,12 @@ fn cmd_p4k_convert_v2(
         stats.cdr_offset
     );
     Ok(())
+}
+
+fn finish_progress_bar(pb: &mut Option<ProgressBar>, message: impl Into<String>) {
+    if let Some(pb) = pb.take() {
+        pb.finish_with_message(message.into());
+    }
 }
 
 fn cmd_p4k_rewrite_v2_tail(p4k: &PathBuf) -> Result<()> {

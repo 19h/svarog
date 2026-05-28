@@ -93,6 +93,61 @@ pub struct P4kWriteStats {
     pub file_size: u64,
 }
 
+/// Copy strategy used while preserving the v1 payload prefix during conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P4kConvertCopyMethod {
+    /// Linux reflink/FICLONE cloned the prefix extents.
+    Reflink,
+    /// Linux `copy_file_range` copied the prefix in-kernel.
+    CopyFileRange,
+    /// Portable buffered userspace copy.
+    Buffered,
+    /// No payload prefix needed to be copied.
+    Empty,
+}
+
+/// Structured progress event emitted by [`convert_v1_to_v2_with_progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P4kConvertProgress {
+    /// Source archive open/parsing has started.
+    OpeningSource,
+    /// Source archive opened and basic metadata is known.
+    SourceOpened {
+        entry_count: usize,
+        source_file_size: u64,
+    },
+    /// Converter is preparing v2 CDR metadata and freelist ranges.
+    PlanningEntries { entry_count: usize },
+    /// Absolute entry-planning progress.
+    PlanningProgress { planned: usize, total: usize },
+    /// Entry planning is complete.
+    PlanningFinished {
+        entry_count: usize,
+        payload_bytes: u64,
+        freelist_blocks: usize,
+    },
+    /// Payload prefix preservation has started.
+    CopyStarted { bytes: u64 },
+    /// Absolute payload prefix copy progress.
+    CopyProgress { copied: u64, total: u64 },
+    /// Payload prefix preservation is complete.
+    CopyFinished {
+        bytes: u64,
+        method: P4kConvertCopyMethod,
+    },
+    /// V2 install block, CDR, name table, trie cache, and EOCDR are being written.
+    TailStarted {
+        entry_count: usize,
+        freelist_blocks: usize,
+    },
+    /// V2 metadata tail has been written to the temporary output.
+    TailFinished { file_size: u64, cdr_offset: u64 },
+    /// Temporary output is being published to the final output path.
+    Publishing,
+    /// Conversion completed successfully.
+    Finished { stats: P4kWriteStats },
+}
+
 /// Metadata supplied for a newly staged P4K entry.
 ///
 /// The official writer fills `signature` with `RSA1024_SignMetaData`,
@@ -1185,10 +1240,30 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
+    convert_v1_to_v2_with_progress(input, output, options, |_| {})
+}
+
+/// Convert a v1 P4K archive to v2 and emit structured progress events.
+///
+/// The converter preserves compressed payload bytes, compression
+/// method, CRC, sizes, encryption flags, RSA signatures, and SHA-256
+/// metadata.
+pub fn convert_v1_to_v2_with_progress<P, Q, F>(
+    input: P,
+    output: Q,
+    options: P4kWriterOptions,
+    mut progress: F,
+) -> Result<P4kWriteStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    F: FnMut(P4kConvertProgress),
+{
     validate_options(&options)?;
 
     let input = input.as_ref();
     let output = output.as_ref();
+    progress(P4kConvertProgress::OpeningSource);
     let archive = P4kArchive::open(input)?;
     if archive.version() != P4kVersion::V1 {
         return Err(Error::Io(io::Error::new(
@@ -1204,6 +1279,10 @@ where
     }
 
     let source_file_size = fs::metadata(input)?.len();
+    progress(P4kConvertProgress::SourceOpened {
+        entry_count: archive.entry_count(),
+        source_file_size,
+    });
     let raw_entries = archive.raw_entries()?;
     let mut payload_end_unaligned = max_v1_payload_end(&raw_entries)?;
     if payload_end_unaligned > source_file_size {
@@ -1220,7 +1299,17 @@ where
         offset: block.offset,
         size: block.size,
     }));
-    for raw in raw_entries {
+    progress(P4kConvertProgress::PlanningEntries {
+        entry_count: raw_entries.len(),
+    });
+    let total_entries = raw_entries.len();
+    for (index, raw) in raw_entries.into_iter().enumerate() {
+        if index % 4096 == 0 {
+            progress(P4kConvertProgress::PlanningProgress {
+                planned: index,
+                total: total_entries,
+            });
+        }
         if raw.payload_len != 0 && raw.payload_offset % options.sector_size != 0 {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1253,23 +1342,80 @@ where
             size: raw.local_record_size,
         });
     }
+    progress(P4kConvertProgress::PlanningProgress {
+        planned: total_entries,
+        total: total_entries,
+    });
     merge_freelist_blocks(&mut freelist_blocks)?;
     trim_trailing_freelist_blocks(
         &mut freelist_blocks,
         &mut payload_end_unaligned,
         options.sector_size,
     )?;
+    progress(P4kConvertProgress::PlanningFinished {
+        entry_count: entries.len(),
+        payload_bytes: payload_end_unaligned,
+        freelist_blocks: freelist_blocks.len(),
+    });
 
     let (temp_output, mut file) = create_temp_output_file(output)?;
     let result = (|| {
         if payload_end_unaligned > 0 {
+            progress(P4kConvertProgress::CopyStarted {
+                bytes: payload_end_unaligned,
+            });
             let input_file = File::open(input)?;
-            if !try_clone_prefix(&input_file, &mut file, payload_end_unaligned)?
-                && !try_copy_file_range_prefix(&input_file, &mut file, payload_end_unaligned)?
-            {
-                copy_exact_prefix(input_file, &mut file, payload_end_unaligned)?;
+            if try_clone_prefix(&input_file, &mut file, payload_end_unaligned)? {
+                progress(P4kConvertProgress::CopyProgress {
+                    copied: payload_end_unaligned,
+                    total: payload_end_unaligned,
+                });
+                progress(P4kConvertProgress::CopyFinished {
+                    bytes: payload_end_unaligned,
+                    method: P4kConvertCopyMethod::Reflink,
+                });
+            } else if try_copy_file_range_prefix_with_progress(
+                &input_file,
+                &mut file,
+                payload_end_unaligned,
+                |copied| {
+                    progress(P4kConvertProgress::CopyProgress {
+                        copied,
+                        total: payload_end_unaligned,
+                    });
+                },
+            )? {
+                progress(P4kConvertProgress::CopyFinished {
+                    bytes: payload_end_unaligned,
+                    method: P4kConvertCopyMethod::CopyFileRange,
+                });
+            } else {
+                copy_exact_prefix_with_progress(
+                    input_file,
+                    &mut file,
+                    payload_end_unaligned,
+                    |copied| {
+                        progress(P4kConvertProgress::CopyProgress {
+                            copied,
+                            total: payload_end_unaligned,
+                        });
+                    },
+                )?;
+                progress(P4kConvertProgress::CopyFinished {
+                    bytes: payload_end_unaligned,
+                    method: P4kConvertCopyMethod::Buffered,
+                });
             }
+        } else {
+            progress(P4kConvertProgress::CopyFinished {
+                bytes: 0,
+                method: P4kConvertCopyMethod::Empty,
+            });
         }
+        progress(P4kConvertProgress::TailStarted {
+            entry_count: entries.len(),
+            freelist_blocks: freelist_blocks.len(),
+        });
         let mut out = BufWriter::with_capacity(1024 * 1024, file);
         let stats = write_v2_tail(
             &mut out,
@@ -1279,6 +1425,10 @@ where
             &options,
             false,
         )?;
+        progress(P4kConvertProgress::TailFinished {
+            file_size: stats.file_size,
+            cdr_offset: stats.cdr_offset,
+        });
         out.flush()?;
         let file = out
             .into_inner()
@@ -1287,7 +1437,10 @@ where
         Ok(stats)
     })();
 
-    finish_temp_output(temp_output, output, result)
+    progress(P4kConvertProgress::Publishing);
+    let stats = finish_temp_output(temp_output, output, result)?;
+    progress(P4kConvertProgress::Finished { stats });
+    Ok(stats)
 }
 
 /// Rebuild only the v2 metadata tail of an existing archive in place.
@@ -1586,19 +1739,23 @@ fn try_clone_prefix(source: &File, destination: &mut File, expected_len: u64) ->
     }
 }
 
-fn try_copy_file_range_prefix(
+fn try_copy_file_range_prefix_with_progress<F>(
     source: &File,
     destination: &mut File,
     expected_len: u64,
-) -> Result<bool> {
+    progress: F,
+) -> Result<bool>
+where
+    F: FnMut(u64),
+{
     #[cfg(target_os = "linux")]
     {
-        try_copy_file_range_prefix_linux(source, destination, expected_len)
+        try_copy_file_range_prefix_linux(source, destination, expected_len, progress)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (source, destination, expected_len);
+        let _ = (source, destination, expected_len, progress);
         Ok(false)
     }
 }
@@ -1635,6 +1792,7 @@ fn try_copy_file_range_prefix_linux(
     source: &File,
     destination: &mut File,
     expected_len: u64,
+    mut progress: impl FnMut(u64),
 ) -> Result<bool> {
     unsafe extern "C" {
         fn copy_file_range(
@@ -1692,6 +1850,7 @@ fn try_copy_file_range_prefix_linux(
         copied = copied.checked_add(result as u64).ok_or_else(|| {
             Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "copy overflow"))
         })?;
+        progress(copied);
     }
 
     destination.seek(SeekFrom::Start(expected_len))?;
@@ -1702,6 +1861,20 @@ fn copy_exact_prefix<R, W>(reader: R, writer: &mut W, expected_len: u64) -> Resu
 where
     R: Read,
     W: Write,
+{
+    copy_exact_prefix_with_progress(reader, writer, expected_len, |_| {})
+}
+
+fn copy_exact_prefix_with_progress<R, W, F>(
+    reader: R,
+    writer: &mut W,
+    expected_len: u64,
+    mut progress: F,
+) -> Result<()>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
 {
     const BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
@@ -1720,6 +1893,7 @@ where
         }
         writer.write_all(&buffer[..read])?;
         copied += read as u64;
+        progress(copied);
     }
     Ok(())
 }
@@ -4088,7 +4262,9 @@ mod tests {
             .create_new(true)
             .open(&destination_path)
             .unwrap();
-        let copied = try_copy_file_range_prefix(&source, &mut destination, 10).unwrap();
+        let copied =
+            try_copy_file_range_prefix_with_progress(&source, &mut destination, 10, |_| {})
+                .unwrap();
 
         if copied {
             assert_eq!(destination.stream_position().unwrap(), 10);
