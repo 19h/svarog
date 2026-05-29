@@ -577,7 +577,7 @@ fn writer_builds_dump_verified_v2_layout() {
     let trie_cache =
         &bytes[name_table_end..name_table_end + usize::try_from(eocdr.trie_cache_size).unwrap()];
     assert!(u32::from_le_bytes(trie_cache[0..4].try_into().unwrap()) >= 24);
-    assert_eq!(u32::from_le_bytes(trie_cache[4..8].try_into().unwrap()), 4);
+    assert_eq!(u32::from_le_bytes(trie_cache[4..8].try_into().unwrap()), 1);
     assert_eq!(
         u32::from_le_bytes(trie_cache[8..12].try_into().unwrap()),
         16

@@ -1724,6 +1724,7 @@ impl P4kArchive {
             cdr_bytes,
             names_bytes,
             num_entries,
+            base_entries,
             install_block,
             physical_sector_size,
             end_of_payload,
@@ -1863,6 +1864,7 @@ impl P4kArchive {
         cdr_bytes: &[u8],
         names_bytes: &[u8],
         num_entries: usize,
+        base_entries: usize,
         install_block: &[u8],
         physical_sector_size: usize,
         end_of_payload: usize,
@@ -1875,6 +1877,7 @@ impl P4kArchive {
                 let parsed_entries = Self::parse_v2_entries_parallel(
                     cdr_bytes,
                     names,
+                    base_entries,
                     install_block,
                     physical_sector_size,
                     end_of_payload,
@@ -1899,6 +1902,7 @@ impl P4kArchive {
                 entry,
                 index,
                 name,
+                index >= base_entries,
                 install_block,
                 physical_sector_size,
                 end_of_payload,
@@ -1930,6 +1934,7 @@ impl P4kArchive {
     fn parse_v2_entries_parallel(
         cdr_bytes: &[u8],
         names: Vec<String>,
+        base_entries: usize,
         install_block: &[u8],
         physical_sector_size: usize,
         end_of_payload: usize,
@@ -1945,6 +1950,7 @@ impl P4kArchive {
                     cdr_bytes,
                     index,
                     name,
+                    index >= base_entries,
                     install_block,
                     physical_sector_size,
                     end_of_payload,
@@ -1959,6 +1965,7 @@ impl P4kArchive {
         cdr_bytes: &[u8],
         index: usize,
         name: String,
+        is_extension_entry: bool,
         install_block: &[u8],
         physical_sector_size: usize,
         end_of_payload: usize,
@@ -1969,6 +1976,7 @@ impl P4kArchive {
             entry,
             index,
             name,
+            is_extension_entry,
             install_block,
             physical_sector_size,
             end_of_payload,
@@ -1980,6 +1988,7 @@ impl P4kArchive {
         entry: CentralDirectoryHeaderV2,
         index: usize,
         name: String,
+        is_extension_entry: bool,
         install_block: &[u8],
         physical_sector_size: usize,
         end_of_payload: usize,
@@ -1999,7 +2008,7 @@ impl P4kArchive {
             )));
         }
         let is_encrypted = entry.is_encrypted();
-        if data_offset % physical_sector_size as u64 != 0 {
+        if !is_extension_entry && data_offset % physical_sector_size as u64 != 0 {
             return Err(Error::MalformedV2Entry(format!(
                 "entry {} data offset {} is not aligned to physical sector size {}",
                 index, data_offset, physical_sector_size
@@ -2065,7 +2074,8 @@ impl P4kArchive {
                 sha256: entry.sha256,
                 bytes_already_written,
             },
-            payload_range: (compressed_len != 0).then_some((data_start, data_end, index)),
+            payload_range: (compressed_len != 0 && !is_extension_entry)
+                .then_some((data_start, data_end, index)),
         })
     }
 
