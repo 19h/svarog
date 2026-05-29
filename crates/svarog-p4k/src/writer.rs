@@ -38,7 +38,7 @@ use crate::zip::{
     P4kEncryptionExtraField, P4kSha256ExtraField, P4kSignatureExtraField, P4kZip64ExtraField,
     CDR_V2_ENTRY_SIZE, EOCD_V2_MAGIC, EOCD_V2_SIZE, EOCD_V2_VERSION,
 };
-use crate::{crypto, decompress, Error, P4kArchive, P4kVersion, Result};
+use crate::{crypto, decompress, parse_subarchive, Error, P4kArchive, P4kVersion, Result};
 
 const DEFAULT_SECTOR_SIZE: u64 = 4096;
 const CDR_ALIGNMENT: u64 = 0x1_0000;
@@ -254,8 +254,8 @@ impl Drop for PayloadSource {
     }
 }
 
-struct V2EntryMeta<'a> {
-    name: &'a str,
+struct V2EntryMeta {
+    name: String,
     offset_to_file_data: u64,
     compressed_size: u64,
     uncompressed_size: u64,
@@ -957,7 +957,7 @@ impl P4kBuilder {
             let next_aligned = align_up(next_offset, self.options.sector_size)?;
             write_zeroes(writer, next_aligned - next_offset)?;
             entries.push(V2EntryMeta {
-                name: &entry.name,
+                name: entry.name.clone(),
                 offset_to_file_data: if payload_metadata.len == 0 { 0 } else { offset },
                 compressed_size: payload_metadata.len,
                 uncompressed_size: entry.uncompressed_size,
@@ -976,6 +976,7 @@ impl P4kBuilder {
         write_v2_tail(
             writer,
             &entries,
+            &[],
             &[],
             payload_end_unaligned,
             &self.options,
@@ -1293,6 +1294,7 @@ where
     }
 
     let mut entries = Vec::with_capacity(raw_entries.len());
+    let mut extension_entries = Vec::new();
     let mut freelist_blocks =
         Vec::with_capacity(raw_entries.len() + archive.freelist_blocks().len());
     freelist_blocks.extend(archive.freelist_blocks().iter().map(|block| FreelistBlock {
@@ -1303,6 +1305,7 @@ where
         entry_count: raw_entries.len(),
     });
     let total_entries = raw_entries.len();
+    let mut input_for_subarchives = File::open(input)?;
     for (index, raw) in raw_entries.into_iter().enumerate() {
         if index % 4096 == 0 {
             progress(P4kConvertProgress::PlanningProgress {
@@ -1319,8 +1322,21 @@ where
                 ),
             )));
         }
+        if raw.payload_len != 0 {
+            if is_p4k_subarchive_zst_name(raw.name) {
+                extension_entries.extend(read_subarchive_extension_entries(
+                    &mut input_for_subarchives,
+                    &raw,
+                )?);
+            } else if is_socpak_name(raw.name) || is_pak_name(raw.name) {
+                extension_entries.extend(read_socpak_extension_entries(
+                    &mut input_for_subarchives,
+                    &raw,
+                )?);
+            }
+        }
         entries.push(V2EntryMeta {
-            name: raw.name,
+            name: raw.name.to_owned(),
             offset_to_file_data: if raw.payload_len == 0 {
                 0
             } else {
@@ -1420,6 +1436,7 @@ where
         let stats = write_v2_tail(
             &mut out,
             &entries,
+            &extension_entries,
             &freelist_blocks,
             payload_end_unaligned,
             &options,
@@ -1480,36 +1497,12 @@ pub fn rewrite_v2_tail_in_place<P: AsRef<Path>>(path: P) -> Result<P4kWriteStats
         validate_options(&options)?;
 
         let raw_entries = archive.raw_entries()?;
-        let mut entries = Vec::with_capacity(raw_entries.len());
+        let mut all_entries = Vec::with_capacity(raw_entries.len());
         for raw in raw_entries {
-            if raw.payload_len != 0 && raw.payload_offset % sector_size != 0 {
-                return Err(Error::Io(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "payload offset {} for {} is not aligned to sector size {}",
-                        raw.payload_offset, raw.name, sector_size
-                    ),
-                )));
-            }
-            entries.push(V2EntryMeta {
-                name: raw.name,
-                offset_to_file_data: if raw.payload_len == 0 {
-                    0
-                } else {
-                    raw.payload_offset
-                },
-                compressed_size: raw.payload_len,
-                uncompressed_size: raw.uncompressed_size,
-                compression_method: raw.compression_method,
-                crc32: raw.crc32,
-                last_mod_file_time: raw.last_mod_file_time,
-                last_mod_file_date: raw.last_mod_file_date,
-                encrypted: raw.is_encrypted,
-                signature: raw.signature,
-                sha256: raw.sha256,
-                bytes_already_written: raw.bytes_already_written,
-            });
+            all_entries.push(raw_entry_to_v2_meta(&raw));
         }
+        let (entries, extension_entries) =
+            split_container_extension_entries(all_entries, sector_size)?;
 
         let freelist_blocks: Vec<_> = archive
             .freelist_blocks()
@@ -1527,6 +1520,7 @@ pub fn rewrite_v2_tail_in_place<P: AsRef<Path>>(path: P) -> Result<P4kWriteStats
             let stats = write_v2_tail(
                 &mut writer,
                 &entries,
+                &extension_entries,
                 &freelist_blocks,
                 end_of_payload,
                 &options,
@@ -1576,6 +1570,166 @@ pub fn rewrite_v2_tail_in_place<P: AsRef<Path>>(path: P) -> Result<P4kWriteStats
     result
 }
 
+fn raw_entry_to_v2_meta(raw: &crate::archive::P4kRawEntryRef<'_>) -> V2EntryMeta {
+    V2EntryMeta {
+        name: raw.name.to_owned(),
+        offset_to_file_data: if raw.payload_len == 0 {
+            0
+        } else {
+            raw.payload_offset
+        },
+        compressed_size: raw.payload_len,
+        uncompressed_size: raw.uncompressed_size,
+        compression_method: raw.compression_method,
+        crc32: raw.crc32,
+        last_mod_file_time: raw.last_mod_file_time,
+        last_mod_file_date: raw.last_mod_file_date,
+        encrypted: raw.is_encrypted,
+        signature: raw.signature,
+        sha256: raw.sha256,
+        bytes_already_written: raw.bytes_already_written,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ContainerRange {
+    index: usize,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PrefixContainerMax {
+    first_index: usize,
+    first_end: u64,
+    second_index: usize,
+    second_end: u64,
+}
+
+fn split_container_extension_entries(
+    all_entries: Vec<V2EntryMeta>,
+    sector_size: u64,
+) -> Result<(Vec<V2EntryMeta>, Vec<V2EntryMeta>)> {
+    let mut containers = Vec::new();
+    for (index, entry) in all_entries.iter().enumerate() {
+        if entry.compressed_size == 0 || !is_nested_archive_container_name(&entry.name) {
+            continue;
+        }
+        let end = entry
+            .offset_to_file_data
+            .checked_add(entry.compressed_size)
+            .ok_or_else(|| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("container {} payload range overflow", entry.name),
+                ))
+            })?;
+        containers.push(ContainerRange {
+            index,
+            start: entry.offset_to_file_data,
+            end,
+        });
+    }
+    containers.sort_by_key(|container| (container.start, container.end));
+    let prefix_max = build_container_prefix_max(&containers);
+
+    let mut entries = Vec::with_capacity(all_entries.len());
+    let mut extension_entries = Vec::new();
+    for (index, entry) in all_entries.into_iter().enumerate() {
+        let is_extension = entry.compressed_size != 0
+            && entry
+                .offset_to_file_data
+                .checked_add(entry.compressed_size)
+                .is_some_and(|end| {
+                    is_range_inside_container(
+                        &containers,
+                        &prefix_max,
+                        index,
+                        entry.offset_to_file_data,
+                        end,
+                    )
+                });
+        if is_extension {
+            extension_entries.push(entry);
+        } else {
+            if entry.compressed_size != 0 && entry.offset_to_file_data % sector_size != 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "non-extension entry {} has unaligned payload offset {}",
+                        entry.name, entry.offset_to_file_data
+                    ),
+                )));
+            }
+            entries.push(entry);
+        }
+    }
+
+    Ok((entries, extension_entries))
+}
+
+fn build_container_prefix_max(containers: &[ContainerRange]) -> Vec<PrefixContainerMax> {
+    let mut prefix = Vec::with_capacity(containers.len());
+    let mut best = PrefixContainerMax {
+        first_index: usize::MAX,
+        first_end: 0,
+        second_index: usize::MAX,
+        second_end: 0,
+    };
+    for container in containers {
+        if container.end > best.first_end {
+            if container.index != best.first_index {
+                best.second_index = best.first_index;
+                best.second_end = best.first_end;
+            }
+            best.first_index = container.index;
+            best.first_end = container.end;
+        } else if container.index != best.first_index && container.end > best.second_end {
+            best.second_index = container.index;
+            best.second_end = container.end;
+        }
+        prefix.push(best);
+    }
+    prefix
+}
+
+fn is_range_inside_container(
+    containers: &[ContainerRange],
+    prefix_max: &[PrefixContainerMax],
+    entry_index: usize,
+    start: u64,
+    end: u64,
+) -> bool {
+    let prefix_len = container_prefix_len_at_or_before(containers, start);
+    if prefix_len == 0 {
+        return false;
+    }
+    let best = prefix_max[prefix_len - 1];
+    if best.first_index != entry_index {
+        best.first_end >= end
+    } else {
+        best.second_end >= end
+    }
+}
+
+fn container_prefix_len_at_or_before(containers: &[ContainerRange], start: u64) -> usize {
+    let mut low = 0usize;
+    let mut high = containers.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if containers[mid].start <= start {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+fn is_nested_archive_container_name(name: &str) -> bool {
+    is_p4k_subarchive_zst_name(name) || is_socpak_name(name) || is_pak_name(name)
+}
+
 fn max_v1_payload_end(raw_entries: &[crate::archive::P4kRawEntryRef<'_>]) -> Result<u64> {
     let mut max_payload_end = 0u64;
     for raw in raw_entries {
@@ -1594,6 +1748,350 @@ fn max_v1_payload_end(raw_entries: &[crate::archive::P4kRawEntryRef<'_>]) -> Res
         max_payload_end = max_payload_end.max(payload_end);
     }
     Ok(max_payload_end)
+}
+
+fn read_subarchive_extension_entries<R: Read + Seek>(
+    reader: &mut R,
+    raw: &crate::archive::P4kRawEntryRef<'_>,
+) -> Result<Vec<V2EntryMeta>> {
+    let payload_len = usize::try_from(raw.payload_len).map_err(|_| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("subarchive {} payload length overflows usize", raw.name),
+        ))
+    })?;
+    let mut payload = vec![0u8; payload_len];
+    reader.seek(SeekFrom::Start(raw.payload_offset))?;
+    reader.read_exact(&mut payload)?;
+
+    let Ok(subarchive) = parse_subarchive(&payload) else {
+        return Ok(Vec::new());
+    };
+
+    let mut entries = Vec::with_capacity(subarchive.entries.len());
+    for entry in subarchive.entries {
+        let offset_to_file_data = raw
+            .payload_offset
+            .checked_add(entry.offset_to_file_data)
+            .ok_or_else(|| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "subarchive {} entry {} payload offset overflow",
+                        raw.name, entry.name
+                    ),
+                ))
+            })?;
+
+        entries.push(V2EntryMeta {
+            name: p4k_subarchive_virtual_name(raw.name, &entry.name),
+            offset_to_file_data,
+            compressed_size: entry.compressed_size,
+            uncompressed_size: entry.uncompressed_size,
+            compression_method: entry.compression_method,
+            crc32: entry.crc32,
+            last_mod_file_time: entry.last_mod_file_time,
+            last_mod_file_date: entry.last_mod_file_date,
+            encrypted: false,
+            signature: entry.signature,
+            sha256: entry.sha256,
+            bytes_already_written: entry.compressed_size,
+        });
+    }
+
+    Ok(entries)
+}
+
+fn read_socpak_extension_entries<R: Read + Seek>(
+    reader: &mut R,
+    raw: &crate::archive::P4kRawEntryRef<'_>,
+) -> Result<Vec<V2EntryMeta>> {
+    let payload_len = usize::try_from(raw.payload_len).map_err(|_| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("socpak {} payload length overflows usize", raw.name),
+        ))
+    })?;
+    let mut payload = vec![0u8; payload_len];
+    reader.seek(SeekFrom::Start(raw.payload_offset))?;
+    reader.read_exact(&mut payload)?;
+
+    let Some(cdr_offset) = find_zip_central_directory_offset(&payload)? else {
+        return Ok(Vec::new());
+    };
+    let mut cursor = cdr_offset;
+    let prefix = socpak_virtual_prefix(raw.name);
+    let mut entries = Vec::new();
+
+    while cursor
+        .checked_add(46)
+        .is_some_and(|end| end <= payload.len())
+    {
+        if read_u32_le(&payload, cursor)? != 0x0201_4b50 {
+            break;
+        }
+
+        let compression_method_raw = read_u16_le(&payload, cursor + 10)?;
+        let compression_method = match CompressionMethod::try_from(compression_method_raw) {
+            Ok(method) => method,
+            Err(_) => break,
+        };
+        let last_mod_file_time = read_u16_le(&payload, cursor + 12)?;
+        let last_mod_file_date = read_u16_le(&payload, cursor + 14)?;
+        let crc32 = read_u32_le(&payload, cursor + 16)?;
+        let mut compressed_size = read_u32_le(&payload, cursor + 20)? as u64;
+        let mut uncompressed_size = read_u32_le(&payload, cursor + 24)? as u64;
+        let name_len = read_u16_le(&payload, cursor + 28)? as usize;
+        let extra_len = read_u16_le(&payload, cursor + 30)? as usize;
+        let comment_len = read_u16_le(&payload, cursor + 32)? as usize;
+        let mut local_header_offset = read_u32_le(&payload, cursor + 42)? as u64;
+        let name_start = cursor + 46;
+        let name_end = name_start.checked_add(name_len).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socpak CDR name range overflow",
+            ))
+        })?;
+        let extra_start = name_end;
+        let extra_end = extra_start.checked_add(extra_len).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socpak CDR extra range overflow",
+            ))
+        })?;
+        let record_end = extra_end.checked_add(comment_len).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socpak CDR record range overflow",
+            ))
+        })?;
+        if record_end > payload.len() {
+            break;
+        }
+
+        apply_zip64_extra_overrides(
+            &payload[extra_start..extra_end],
+            &mut uncompressed_size,
+            &mut compressed_size,
+            &mut local_header_offset,
+        )?;
+
+        let name = std::str::from_utf8(&payload[name_start..name_end]).map_err(|err| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("socpak {} CDR entry name is not UTF-8: {err}", raw.name),
+            ))
+        })?;
+        let normalized_name = name.replace('\\', "/");
+        if !normalized_name.is_empty() && !normalized_name.ends_with('/') && compressed_size != 0 {
+            let local_header_offset_usize = usize::try_from(local_header_offset).map_err(|_| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("socpak {} local header offset overflows usize", raw.name),
+                ))
+            })?;
+            let data_offset = zip_local_data_offset(&payload, local_header_offset_usize)?;
+            let absolute_offset = raw
+                .payload_offset
+                .checked_add(data_offset as u64)
+                .ok_or_else(|| {
+                    Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "socpak {} entry {} payload offset overflow",
+                            raw.name, normalized_name
+                        ),
+                    ))
+                })?;
+            let compressed_payload = payload
+                .get(data_offset..)
+                .and_then(|tail| tail.get(..usize::try_from(compressed_size).ok()?));
+            let sha256 = if let Some(bytes) = compressed_payload {
+                Sha256::digest(bytes).into()
+            } else {
+                [0; 32]
+            };
+
+            entries.push(V2EntryMeta {
+                name: format!("{prefix}{normalized_name}"),
+                offset_to_file_data: absolute_offset,
+                compressed_size,
+                uncompressed_size,
+                compression_method,
+                crc32,
+                last_mod_file_time,
+                last_mod_file_date,
+                encrypted: false,
+                signature: [0; 128],
+                sha256,
+                bytes_already_written: compressed_size,
+            });
+        }
+
+        cursor = record_end;
+    }
+
+    Ok(entries)
+}
+
+fn p4k_subarchive_virtual_name(archive_name: &str, entry_name: &str) -> String {
+    let archive = archive_name.replace('\\', "/");
+    let entry = entry_name.replace('\\', "/");
+    if archive
+        .get(.."Engine/ShaderCache_".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Engine/ShaderCache_"))
+        && entry
+            .get(.."Shaders/".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Shaders/"))
+    {
+        format!("Engine/{entry}")
+    } else {
+        entry
+    }
+}
+
+fn find_zip_central_directory_offset(payload: &[u8]) -> Result<Option<usize>> {
+    let Some(eocd_offset) = find_signature_from_end(payload, 0x0605_4b50) else {
+        return Ok(None);
+    };
+    let mut cdr_offset = read_u32_le(payload, eocd_offset + 16)? as u64;
+    if cdr_offset == 0xFFFF_FFFF {
+        if let Some(locator_offset) = find_signature_from_end(&payload[..eocd_offset], 0x0706_4b50)
+        {
+            let zip64_eocd_offset = read_u64_le(payload, locator_offset + 8)?;
+            cdr_offset = read_u64_le(
+                payload,
+                usize::try_from(zip64_eocd_offset).unwrap_or(usize::MAX) + 48,
+            )?;
+        }
+    }
+    let cdr_offset = usize::try_from(cdr_offset).map_err(|_| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socpak central directory offset overflows usize",
+        ))
+    })?;
+    Ok((cdr_offset < payload.len()).then_some(cdr_offset))
+}
+
+fn find_signature_from_end(bytes: &[u8], signature: u32) -> Option<usize> {
+    let needle = signature.to_le_bytes();
+    bytes
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+fn apply_zip64_extra_overrides(
+    extra: &[u8],
+    uncompressed_size: &mut u64,
+    compressed_size: &mut u64,
+    local_header_offset: &mut u64,
+) -> Result<()> {
+    let mut cursor = 0usize;
+    while cursor + 4 <= extra.len() {
+        let header_id = read_u16_le(extra, cursor)?;
+        let data_size = read_u16_le(extra, cursor + 2)? as usize;
+        let data_start = cursor + 4;
+        let data_end = data_start.checked_add(data_size).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ZIP64 extra field range overflow",
+            ))
+        })?;
+        if data_end > extra.len() {
+            break;
+        }
+        if header_id == 0x0001 {
+            let mut offset = data_start;
+            if *uncompressed_size == 0xFFFF_FFFF {
+                *uncompressed_size = read_u64_le(extra, offset)?;
+                offset += 8;
+            }
+            if *compressed_size == 0xFFFF_FFFF {
+                *compressed_size = read_u64_le(extra, offset)?;
+                offset += 8;
+            }
+            if *local_header_offset == 0xFFFF_FFFF {
+                *local_header_offset = read_u64_le(extra, offset)?;
+            }
+        }
+        cursor = data_end;
+    }
+    Ok(())
+}
+
+fn zip_local_data_offset(payload: &[u8], local_header_offset: usize) -> Result<usize> {
+    if read_u32_le(payload, local_header_offset)? != 0x0403_4b50 {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "socpak local header signature mismatch",
+        )));
+    }
+    let name_len = read_u16_le(payload, local_header_offset + 26)? as usize;
+    let extra_len = read_u16_le(payload, local_header_offset + 28)? as usize;
+    local_header_offset
+        .checked_add(30)
+        .and_then(|value| value.checked_add(name_len))
+        .and_then(|value| value.checked_add(extra_len))
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socpak local data offset overflow",
+            ))
+        })
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16> {
+    let end = offset.checked_add(2).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "u16 offset overflow",
+        ))
+    })?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u16")))?;
+    Ok(u16::from_le_bytes(
+        slice.try_into().expect("u16 slice length checked"),
+    ))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
+    let end = offset.checked_add(4).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "u32 offset overflow",
+        ))
+    })?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u32")))?;
+    Ok(u32::from_le_bytes(
+        slice.try_into().expect("u32 slice length checked"),
+    ))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Result<u64> {
+    let end = offset.checked_add(8).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "u64 offset overflow",
+        ))
+    })?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "missing u64")))?;
+    Ok(u64::from_le_bytes(
+        slice.try_into().expect("u64 slice length checked"),
+    ))
+}
+
+fn socpak_virtual_prefix(name: &str) -> String {
+    let normalized = name.replace('\\', "/");
+    match normalized.rfind('/') {
+        Some(index) => normalized[..=index].to_owned(),
+        None => String::new(),
+    }
 }
 
 fn write_archive_to_temp_output<F>(output: &Path, write: F) -> Result<P4kWriteStats>
@@ -1923,13 +2421,17 @@ impl TrieNode {
     }
 }
 
-fn build_v2_trie_cache(entries: &[V2EntryMeta<'_>]) -> Result<Vec<u8>> {
+fn build_v2_trie_cache_from_iter<'a, I>(entries: I) -> Result<Vec<u8>>
+where
+    I: IntoIterator<Item = &'a V2EntryMeta>,
+{
+    let entries: Vec<_> = entries.into_iter().collect();
     let mut nodes = vec![TrieNode::root()];
     let mut values = Vec::<u32>::new();
     let mut value_indices = HashMap::<Vec<u8>, usize>::with_capacity(entries.len());
 
     for (entry_index, entry) in entries.iter().enumerate() {
-        let normalized = normalize_p4k_path(entry.name, true).into_bytes();
+        let normalized = normalize_p4k_path(&entry.name, true).into_bytes();
         match value_indices.get(&normalized).copied() {
             Some(index) => {
                 values[index] = usize_to_u32(entry_index, "trie value entry index")?;
@@ -1951,16 +2453,7 @@ fn build_v2_trie_cache(entries: &[V2EntryMeta<'_>]) -> Result<Vec<u8>> {
     let mut trie_storage = Vec::new();
     serialize_trie_node(0, &nodes, &mut trie_storage)?;
     let trie_storage_size = usize_to_u32(trie_storage.len(), "trie storage size")?;
-    let value_storage_size = values
-        .len()
-        .checked_mul(std::mem::size_of::<u32>())
-        .ok_or_else(|| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "trie value storage size overflow",
-            ))
-        })
-        .and_then(|value| usize_to_u32(value, "trie value storage size"))?;
+    let value_count = usize_to_u32(values.len(), "trie value count")?;
 
     let folder_trie_root = folder_trie_root_bytes();
     let mut cache = Vec::with_capacity(
@@ -1969,7 +2462,7 @@ fn build_v2_trie_cache(entries: &[V2EntryMeta<'_>]) -> Result<Vec<u8>> {
             + folder_trie_root.len(),
     );
     cache.extend_from_slice(&trie_storage_size.to_le_bytes());
-    cache.extend_from_slice(&value_storage_size.to_le_bytes());
+    cache.extend_from_slice(&value_count.to_le_bytes());
     cache.extend_from_slice(
         &usize_to_u32(folder_trie_root.len(), "folder trie storage size")?.to_le_bytes(),
     );
@@ -2099,7 +2592,8 @@ fn folder_trie_root_bytes() -> [u8; 16] {
 
 fn write_v2_tail<W: Write + Seek>(
     writer: &mut W,
-    entries: &[V2EntryMeta<'_>],
+    entries: &[V2EntryMeta],
+    extension_entries: &[V2EntryMeta],
     freelist_blocks: &[FreelistBlock],
     payload_end_unaligned: u64,
     options: &P4kWriterOptions,
@@ -2121,7 +2615,7 @@ fn write_v2_tail<W: Write + Seek>(
     write_zeroes(writer, end_of_payload - current)?;
 
     let install_block_offset = end_of_payload;
-    for entry in entries {
+    for entry in entries.iter().chain(extension_entries.iter()) {
         writer.write_all(&entry.bytes_already_written.to_le_bytes())?;
     }
     for block in freelist_blocks {
@@ -2145,7 +2639,7 @@ fn write_v2_tail<W: Write + Seek>(
     write_zeroes(writer, cdr_offset - current)?;
 
     let mut name_table_len = 0u64;
-    for entry in entries {
+    for entry in entries.iter().chain(extension_entries.iter()) {
         let name_len = usize_to_u64(entry.name.len(), "name length")?;
         name_table_len = name_table_len
             .checked_add(name_len)
@@ -2157,9 +2651,19 @@ fn write_v2_tail<W: Write + Seek>(
                 ))
             })?;
     }
+    let base_name_table_len = entries.iter().try_fold(0u64, |acc, entry| {
+        acc.checked_add(usize_to_u64(entry.name.len(), "name length")?)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "v2 base name table size overflow",
+                ))
+            })
+    })?;
 
     let mut name_offset = 0u64;
-    for entry in entries {
+    for entry in entries.iter().chain(extension_entries.iter()) {
         let cdr_entry = CentralDirectoryHeaderV2 {
             compression_method: entry.compression_method as u16,
             last_mod_file_time: entry.last_mod_file_time,
@@ -2196,17 +2700,31 @@ fn write_v2_tail<W: Write + Seek>(
                 "v2 CDR size overflow",
             ))
         })?;
-    let name_table_abs_offset = cdr_offset.checked_add(cdr_size).ok_or_else(|| {
-        Error::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "v2 name table offset overflow",
-        ))
-    })?;
-    for entry in entries {
+    let cdr_extension_size = extension_entries
+        .len()
+        .checked_mul(CDR_V2_ENTRY_SIZE)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 extension CDR size overflow",
+            ))
+        })?;
+    let name_table_abs_offset = cdr_offset
+        .checked_add(cdr_size)
+        .and_then(|value| value.checked_add(cdr_extension_size))
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v2 name table offset overflow",
+            ))
+        })?;
+    for entry in entries.iter().chain(extension_entries.iter()) {
         writer.write_all(entry.name.as_bytes())?;
         writer.write_all(&[0])?;
     }
-    let trie_cache = build_v2_trie_cache(entries)?;
+    let all_entries: Vec<_> = entries.iter().chain(extension_entries.iter()).collect();
+    let trie_cache = build_v2_trie_cache_from_iter(all_entries.iter().copied())?;
     let trie_cache_offset = name_table_abs_offset
         .checked_add(name_table_len)
         .ok_or_else(|| {
@@ -2220,13 +2738,16 @@ fn write_v2_tail<W: Write + Seek>(
 
     let eocdr = Eocd2Record {
         number_of_entries: usize_to_u64(entries.len(), "entry count")?,
-        number_of_extension_entries: 0,
+        number_of_extension_entries: usize_to_u64(
+            extension_entries.len(),
+            "extension entry count",
+        )?,
         central_directory_record_offset: cdr_offset,
         central_directory_record_size: cdr_size,
-        central_directory_record_extension_size: 0,
+        central_directory_record_extension_size: cdr_extension_size,
         central_directory_record_text_offset: name_table_abs_offset,
-        central_directory_record_text_size: name_table_len,
-        central_directory_record_extension_text_size: 0,
+        central_directory_record_text_size: base_name_table_len,
+        central_directory_record_extension_text_size: name_table_len - base_name_table_len,
         end_of_payload_offset: end_of_payload,
         num_freelist_blocks: usize_to_u64(freelist_blocks.len(), "freelist block count")?,
         trie_cache_offset,
@@ -2238,7 +2759,8 @@ fn write_v2_tail<W: Write + Seek>(
         magic: EOCD_V2_MAGIC,
     };
     let eof_used = cdr_size
-        .checked_add(name_table_len)
+        .checked_add(cdr_extension_size)
+        .and_then(|value| value.checked_add(name_table_len))
         .and_then(|value| value.checked_add(trie_cache_size))
         .and_then(|value| value.checked_add(EOCD_V2_SIZE as u64))
         .ok_or_else(|| {
@@ -3211,6 +3733,18 @@ fn reject_compressed_p4k_subarchive(name: &str, method: CompressionMethod) -> Re
 
 fn is_p4k_subarchive_zst_name(name: &str) -> bool {
     const SUFFIX: &str = ".p4k_subarchive.zst";
+    name.get(name.len().saturating_sub(SUFFIX.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
+}
+
+fn is_socpak_name(name: &str) -> bool {
+    const SUFFIX: &str = ".socpak";
+    name.get(name.len().saturating_sub(SUFFIX.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
+}
+
+fn is_pak_name(name: &str) -> bool {
+    const SUFFIX: &str = ".pak";
     name.get(name.len().saturating_sub(SUFFIX.len())..)
         .is_some_and(|tail| tail.eq_ignore_ascii_case(SUFFIX))
 }
@@ -4407,7 +4941,7 @@ mod tests {
             ..Default::default()
         };
         let entries = [V2EntryMeta {
-            name: "overflow.bin",
+            name: "overflow.bin".to_string(),
             offset_to_file_data: 0,
             compressed_size: 0,
             uncompressed_size: 0,
@@ -4421,8 +4955,16 @@ mod tests {
             bytes_already_written: 0,
         }];
 
-        let err =
-            write_v2_tail(&mut writer, &entries, &[], u64::MAX - 10, &options, false).unwrap_err();
+        let err = write_v2_tail(
+            &mut writer,
+            &entries,
+            &[],
+            &[],
+            u64::MAX - 10,
+            &options,
+            false,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("v2 CDR offset overflow"),
             "expected CDR offset overflow rejection, got {err}"
