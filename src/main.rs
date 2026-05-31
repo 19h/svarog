@@ -1858,6 +1858,31 @@ fn cmd_p4k_convert_v2(
                     format!("Opened source: {entry_count} entries, {source_file_size} bytes"),
                 );
             }
+            P4kConvertProgress::ScanningEntries { entry_count } => {
+                active_pb = Some(create_progress_bar(entry_count as u64, Stage::P4kConvert));
+                if let Some(pb) = &active_pb {
+                    pb.set_message("[CONVERT] Scanning source payload metadata");
+                }
+            }
+            P4kConvertProgress::ScanningProgress {
+                scanned,
+                total,
+                name,
+            } => {
+                if let Some(pb) = &active_pb {
+                    pb.set_length(total as u64);
+                    pb.set_position(scanned as u64);
+                    if let Some(name) = name {
+                        set_progress_message(pb, Stage::P4kConvert, &name);
+                    }
+                }
+            }
+            P4kConvertProgress::ScanningFinished { entry_count } => {
+                finish_progress_bar(
+                    &mut active_pb,
+                    format!("Scanned {entry_count} source entries"),
+                );
+            }
             P4kConvertProgress::PlanningEntries { entry_count } => {
                 active_pb = Some(create_progress_bar(entry_count as u64, Stage::P4kConvert));
                 if let Some(pb) = &active_pb {

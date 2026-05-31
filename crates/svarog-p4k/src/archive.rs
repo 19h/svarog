@@ -1130,8 +1130,25 @@ impl P4kArchive {
     /// Return compressed payload slices with metadata. Used by the
     /// v1->v2 converter to avoid decompressing/recompressing entries.
     pub(crate) fn raw_entries(&self) -> Result<Vec<P4kRawEntryRef<'_>>> {
+        self.raw_entries_with_progress(|_, _, _| {})
+    }
+
+    /// Return compressed payload slices with metadata, reporting absolute scan
+    /// progress. This resolves v1 local-header payload locations and can take
+    /// noticeable time on large retail archives.
+    pub(crate) fn raw_entries_with_progress<F>(
+        &self,
+        mut progress: F,
+    ) -> Result<Vec<P4kRawEntryRef<'_>>>
+    where
+        F: FnMut(usize, usize, &str),
+    {
         let mut raw_entries = Vec::with_capacity(self.entries.len());
-        for entry in &self.entries {
+        let total = self.entries.len();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index % 4096 == 0 {
+                progress(index, total, &entry.name);
+            }
             let (payload_offset, local_record_size, payload_len) =
                 if entry.flags & FLAG_V2_NO_LOCAL_HEADER != 0 {
                     self.slice_range(
@@ -1180,6 +1197,7 @@ impl P4kArchive {
                 bytes_already_written: entry.bytes_already_written,
             });
         }
+        progress(total, total, "");
         Ok(raw_entries)
     }
 

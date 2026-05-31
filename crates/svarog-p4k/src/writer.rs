@@ -107,7 +107,7 @@ pub enum P4kConvertCopyMethod {
 }
 
 /// Structured progress event emitted by [`convert_v1_to_v2_with_progress`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P4kConvertProgress {
     /// Source archive open/parsing has started.
     OpeningSource,
@@ -116,6 +116,16 @@ pub enum P4kConvertProgress {
         entry_count: usize,
         source_file_size: u64,
     },
+    /// Source entries are being scanned into raw payload metadata.
+    ScanningEntries { entry_count: usize },
+    /// Absolute source entry scan progress.
+    ScanningProgress {
+        scanned: usize,
+        total: usize,
+        name: Option<String>,
+    },
+    /// Source entry scan is complete.
+    ScanningFinished { entry_count: usize },
     /// Converter is preparing v2 CDR metadata and freelist ranges.
     PlanningEntries { entry_count: usize },
     /// Absolute entry-planning progress.
@@ -1284,7 +1294,19 @@ where
         entry_count: archive.entry_count(),
         source_file_size,
     });
-    let raw_entries = archive.raw_entries()?;
+    progress(P4kConvertProgress::ScanningEntries {
+        entry_count: archive.entry_count(),
+    });
+    let raw_entries = archive.raw_entries_with_progress(|scanned, total, name| {
+        progress(P4kConvertProgress::ScanningProgress {
+            scanned,
+            total,
+            name: (!name.is_empty()).then(|| name.to_string()),
+        });
+    })?;
+    progress(P4kConvertProgress::ScanningFinished {
+        entry_count: raw_entries.len(),
+    });
     let mut payload_end_unaligned = max_v1_payload_end(&raw_entries)?;
     if payload_end_unaligned > source_file_size {
         return Err(Error::Io(io::Error::new(
