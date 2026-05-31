@@ -302,6 +302,30 @@ impl P4kArchive {
         &self.freelist_blocks
     }
 
+    /// Raw bytes of the memory-mapped archive file.
+    ///
+    /// Exposed for internal writer/converter paths that need to read embedded
+    /// container payloads (socpak/pak/nested p4k) directly from the map instead
+    /// of issuing a second round of `seek`/`read` syscalls.
+    #[inline]
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.mmap
+    }
+
+    /// Hint the kernel that upcoming map access is random rather than sequential.
+    ///
+    /// The v1→v2 conversion scan touches one ZIP local header per entry, and
+    /// those headers are scattered across the entire (multi-hundred-GiB)
+    /// archive. The default `Sequential` advice triggers aggressive readahead
+    /// and drop-behind, faulting in megabytes of payload that the scan never
+    /// reads. `Random` disables that readahead so each header costs a single
+    /// page, which — paired with the parallel scan issuing many faults at once
+    /// — is dramatically cheaper for cold archives.
+    pub(crate) fn advise_random(&self) {
+        #[cfg(unix)]
+        let _ = self.mmap.advise(Advice::Random);
+    }
+
     /// Detected v1 payload placement convention, exposed for metadata dumps.
     ///
     /// Returns `None` for v2 archives. For v1 archives the value is:
@@ -1143,62 +1167,97 @@ impl P4kArchive {
     where
         F: FnMut(usize, usize, &str),
     {
-        let mut raw_entries = Vec::with_capacity(self.entries.len());
         let total = self.entries.len();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if index % 4096 == 0 {
-                progress(index, total, &entry.name);
+        let mut raw_entries = Vec::with_capacity(total);
+
+        // The per-entry work (`scan_raw_entry`) is a read-only probe against the
+        // memory map, so it parallelizes cleanly. We process in fixed batches so
+        // progress can be reported at batch boundaries without a side channel,
+        // and so results stay in source order (errors propagate deterministically
+        // from the first offending entry).
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+
+            const BATCH: usize = 1 << 14;
+            for (batch_index, batch) in self.entries.chunks(BATCH).enumerate() {
+                progress((batch_index * BATCH).min(total), total, "");
+                let scanned: Vec<Result<P4kRawEntryRef<'_>>> = batch
+                    .par_iter()
+                    .map(|entry| self.scan_raw_entry(entry))
+                    .collect();
+                for entry in scanned {
+                    raw_entries.push(entry?);
+                }
             }
-            let (payload_offset, local_record_size, payload_len) =
-                if entry.flags & FLAG_V2_NO_LOCAL_HEADER != 0 {
-                    self.slice_range(
-                        entry.local_header_offset,
-                        entry.compressed_size,
-                        "v2 entry data out of bounds",
-                    )?;
-                    (entry.local_header_offset, 0, entry.compressed_size)
-                } else {
-                    let (payload_offset, local_record_size, _) = self
-                        .payload_location_by_local_header(
-                            &entry.name,
-                            entry.local_header_offset,
-                            entry.compressed_size,
-                            entry.uncompressed_size,
-                            CompressionMethod::try_from(entry.compression_method as u16)
-                                .map_err(Error::UnsupportedCompression)?,
-                            entry.crc32,
-                            entry.last_mod_file_time,
-                            entry.last_mod_file_date,
-                            entry.sha256,
-                        )?;
-                    self.slice_range(
-                        payload_offset,
-                        entry.compressed_size,
-                        "entry data out of bounds",
-                    )?;
-                    (payload_offset, local_record_size, entry.compressed_size)
-                };
-            let compression_method = CompressionMethod::try_from(entry.compression_method as u16)
-                .map_err(Error::UnsupportedCompression)?;
-            raw_entries.push(P4kRawEntryRef {
-                name: &entry.name,
-                payload_len,
-                local_header_offset: entry.local_header_offset,
-                payload_offset,
-                local_record_size,
-                uncompressed_size: entry.uncompressed_size,
-                compression_method,
-                is_encrypted: entry.flags & FLAG_ENCRYPTED != 0,
-                crc32: entry.crc32,
-                last_mod_file_time: entry.last_mod_file_time,
-                last_mod_file_date: entry.last_mod_file_date,
-                signature: entry.signature,
-                sha256: entry.sha256,
-                bytes_already_written: entry.bytes_already_written,
-            });
         }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            for (index, entry) in self.entries.iter().enumerate() {
+                if index % 4096 == 0 {
+                    progress(index, total, &entry.name);
+                }
+                raw_entries.push(self.scan_raw_entry(entry)?);
+            }
+        }
+
         progress(total, total, "");
         Ok(raw_entries)
+    }
+
+    /// Resolve the payload location and raw metadata for a single source entry.
+    ///
+    /// This only reads from the memory map and entry table, so it is safe to
+    /// invoke concurrently across distinct entries.
+    fn scan_raw_entry<'a>(&self, entry: &'a P4kEntryCompact) -> Result<P4kRawEntryRef<'a>> {
+        let (payload_offset, local_record_size, payload_len) =
+            if entry.flags & FLAG_V2_NO_LOCAL_HEADER != 0 {
+                self.slice_range(
+                    entry.local_header_offset,
+                    entry.compressed_size,
+                    "v2 entry data out of bounds",
+                )?;
+                (entry.local_header_offset, 0, entry.compressed_size)
+            } else {
+                let (payload_offset, local_record_size, _) = self
+                    .payload_location_by_local_header(
+                        &entry.name,
+                        entry.local_header_offset,
+                        entry.compressed_size,
+                        entry.uncompressed_size,
+                        CompressionMethod::try_from(entry.compression_method as u16)
+                            .map_err(Error::UnsupportedCompression)?,
+                        entry.crc32,
+                        entry.last_mod_file_time,
+                        entry.last_mod_file_date,
+                        entry.sha256,
+                    )?;
+                self.slice_range(
+                    payload_offset,
+                    entry.compressed_size,
+                    "entry data out of bounds",
+                )?;
+                (payload_offset, local_record_size, entry.compressed_size)
+            };
+        let compression_method = CompressionMethod::try_from(entry.compression_method as u16)
+            .map_err(Error::UnsupportedCompression)?;
+        Ok(P4kRawEntryRef {
+            name: &entry.name,
+            payload_len,
+            local_header_offset: entry.local_header_offset,
+            payload_offset,
+            local_record_size,
+            uncompressed_size: entry.uncompressed_size,
+            compression_method,
+            is_encrypted: entry.flags & FLAG_ENCRYPTED != 0,
+            crc32: entry.crc32,
+            last_mod_file_time: entry.last_mod_file_time,
+            last_mod_file_date: entry.last_mod_file_date,
+            signature: entry.signature,
+            sha256: entry.sha256,
+            bytes_already_written: entry.bytes_already_written,
+        })
     }
 
     pub(crate) fn unencrypted_stored_payload_slice<'a>(

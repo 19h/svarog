@@ -1289,6 +1289,11 @@ where
         )));
     }
 
+    // The scan and plan phases issue scattered reads of local headers and
+    // embedded container directories across the whole archive; steer the kernel
+    // away from sequential readahead for those random accesses.
+    archive.advise_random();
+
     let source_file_size = fs::metadata(input)?.len();
     progress(P4kConvertProgress::SourceOpened {
         entry_count: archive.entry_count(),
@@ -1327,59 +1332,67 @@ where
         entry_count: raw_entries.len(),
     });
     let total_entries = raw_entries.len();
-    let mut input_for_subarchives = File::open(input)?;
-    for (index, raw) in raw_entries.into_iter().enumerate() {
-        if index % 4096 == 0 {
+    let sector_size = options.sector_size;
+    // Embedded container directories are read straight out of the memory map,
+    // so planning needs no extra file handle and parallelizes cleanly. The
+    // socpak path in particular hashes each nested member (SHA-256), which is
+    // pure CPU work that benefits directly from fan-out.
+    let archive_bytes = archive.bytes();
+    entries.reserve(total_entries);
+    freelist_blocks.reserve(total_entries);
+
+    let assemble = |entries: &mut Vec<V2EntryMeta>,
+                    extension_entries: &mut Vec<V2EntryMeta>,
+                    freelist_blocks: &mut Vec<FreelistBlock>,
+                    planned: PlannedEntry| {
+        entries.push(planned.meta);
+        extension_entries.extend(planned.extension);
+        freelist_blocks.push(planned.freelist);
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        const BATCH: usize = 1 << 13;
+        for (batch_index, batch) in raw_entries.chunks(BATCH).enumerate() {
             progress(P4kConvertProgress::PlanningProgress {
-                planned: index,
+                planned: (batch_index * BATCH).min(total_entries),
                 total: total_entries,
             });
-        }
-        if raw.payload_len != 0 && raw.payload_offset % options.sector_size != 0 {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "destination sector size {} is incompatible with source payload offset {} for {}",
-                    options.sector_size, raw.payload_offset, raw.name
-                ),
-            )));
-        }
-        if raw.payload_len != 0 {
-            if is_p4k_subarchive_zst_name(raw.name) {
-                extension_entries.extend(read_subarchive_extension_entries(
-                    &mut input_for_subarchives,
-                    &raw,
-                )?);
-            } else if is_socpak_name(raw.name) || is_pak_name(raw.name) {
-                extension_entries.extend(read_socpak_extension_entries(
-                    &mut input_for_subarchives,
-                    &raw,
-                )?);
+            let planned: Vec<Result<PlannedEntry>> = batch
+                .par_iter()
+                .map(|raw| plan_one_entry(archive_bytes, raw, sector_size))
+                .collect();
+            for entry in planned {
+                assemble(
+                    &mut entries,
+                    &mut extension_entries,
+                    &mut freelist_blocks,
+                    entry?,
+                );
             }
         }
-        entries.push(V2EntryMeta {
-            name: raw.name.to_owned(),
-            offset_to_file_data: if raw.payload_len == 0 {
-                0
-            } else {
-                raw.payload_offset
-            },
-            compressed_size: raw.payload_len,
-            uncompressed_size: raw.uncompressed_size,
-            compression_method: raw.compression_method,
-            crc32: raw.crc32,
-            last_mod_file_time: raw.last_mod_file_time,
-            last_mod_file_date: raw.last_mod_file_date,
-            encrypted: raw.is_encrypted,
-            signature: raw.signature,
-            sha256: raw.sha256,
-            bytes_already_written: raw.bytes_already_written,
-        });
-        freelist_blocks.push(FreelistBlock {
-            offset: raw.local_header_offset,
-            size: raw.local_record_size,
-        });
     }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for (index, raw) in raw_entries.iter().enumerate() {
+            if index % 4096 == 0 {
+                progress(P4kConvertProgress::PlanningProgress {
+                    planned: index,
+                    total: total_entries,
+                });
+            }
+            assemble(
+                &mut entries,
+                &mut extension_entries,
+                &mut freelist_blocks,
+                plan_one_entry(archive_bytes, raw, sector_size)?,
+            );
+        }
+    }
+
     progress(P4kConvertProgress::PlanningProgress {
         planned: total_entries,
         total: total_entries,
@@ -1772,21 +1785,116 @@ fn max_v1_payload_end(raw_entries: &[crate::archive::P4kRawEntryRef<'_>]) -> Res
     Ok(max_payload_end)
 }
 
-fn read_subarchive_extension_entries<R: Read + Seek>(
-    reader: &mut R,
+/// Per-entry result of the planning phase, assembled back into the v2 metadata
+/// streams in source order on the calling thread.
+struct PlannedEntry {
+    meta: V2EntryMeta,
+    extension: Vec<V2EntryMeta>,
+    freelist: FreelistBlock,
+}
+
+/// Plan a single source entry into its v2 metadata, any embedded container
+/// extension entries, and the freelist block reclaimed from its v1 local header.
+///
+/// Reads only from the memory-mapped archive bytes, so it is safe to run
+/// concurrently across entries.
+fn plan_one_entry(
+    archive_bytes: &[u8],
     raw: &crate::archive::P4kRawEntryRef<'_>,
-) -> Result<Vec<V2EntryMeta>> {
-    let payload_len = usize::try_from(raw.payload_len).map_err(|_| {
+    sector_size: u64,
+) -> Result<PlannedEntry> {
+    if raw.payload_len != 0 && raw.payload_offset % sector_size != 0 {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "destination sector size {} is incompatible with source payload offset {} for {}",
+                sector_size, raw.payload_offset, raw.name
+            ),
+        )));
+    }
+
+    let extension = if raw.payload_len != 0 {
+        if is_p4k_subarchive_zst_name(raw.name) {
+            read_subarchive_extension_entries(archive_bytes, raw)?
+        } else if is_socpak_name(raw.name) || is_pak_name(raw.name) {
+            read_socpak_extension_entries(archive_bytes, raw)?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let meta = V2EntryMeta {
+        name: raw.name.to_owned(),
+        offset_to_file_data: if raw.payload_len == 0 {
+            0
+        } else {
+            raw.payload_offset
+        },
+        compressed_size: raw.payload_len,
+        uncompressed_size: raw.uncompressed_size,
+        compression_method: raw.compression_method,
+        crc32: raw.crc32,
+        last_mod_file_time: raw.last_mod_file_time,
+        last_mod_file_date: raw.last_mod_file_date,
+        encrypted: raw.is_encrypted,
+        signature: raw.signature,
+        sha256: raw.sha256,
+        bytes_already_written: raw.bytes_already_written,
+    };
+
+    let freelist = FreelistBlock {
+        offset: raw.local_header_offset,
+        size: raw.local_record_size,
+    };
+
+    Ok(PlannedEntry {
+        meta,
+        extension,
+        freelist,
+    })
+}
+
+/// Slice the container payload for `raw` directly out of the memory-mapped
+/// archive bytes, avoiding a second `seek`/`read` of data the map already holds.
+fn subarchive_payload_slice<'a>(
+    archive_bytes: &'a [u8],
+    raw: &crate::archive::P4kRawEntryRef<'_>,
+) -> Result<&'a [u8]> {
+    let start = usize::try_from(raw.payload_offset).map_err(|_| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("subarchive {} payload offset overflows usize", raw.name),
+        ))
+    })?;
+    let len = usize::try_from(raw.payload_len).map_err(|_| {
         Error::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("subarchive {} payload length overflows usize", raw.name),
         ))
     })?;
-    let mut payload = vec![0u8; payload_len];
-    reader.seek(SeekFrom::Start(raw.payload_offset))?;
-    reader.read_exact(&mut payload)?;
+    let end = start.checked_add(len).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("subarchive {} payload range overflow", raw.name),
+        ))
+    })?;
+    archive_bytes.get(start..end).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("subarchive {} payload out of bounds", raw.name),
+        ))
+    })
+}
 
-    let Ok(subarchive) = parse_subarchive(&payload) else {
+fn read_subarchive_extension_entries(
+    archive_bytes: &[u8],
+    raw: &crate::archive::P4kRawEntryRef<'_>,
+) -> Result<Vec<V2EntryMeta>> {
+    let payload = subarchive_payload_slice(archive_bytes, raw)?;
+
+    let Ok(subarchive) = parse_subarchive(payload) else {
         return Ok(Vec::new());
     };
 
@@ -1824,21 +1932,13 @@ fn read_subarchive_extension_entries<R: Read + Seek>(
     Ok(entries)
 }
 
-fn read_socpak_extension_entries<R: Read + Seek>(
-    reader: &mut R,
+fn read_socpak_extension_entries(
+    archive_bytes: &[u8],
     raw: &crate::archive::P4kRawEntryRef<'_>,
 ) -> Result<Vec<V2EntryMeta>> {
-    let payload_len = usize::try_from(raw.payload_len).map_err(|_| {
-        Error::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("socpak {} payload length overflows usize", raw.name),
-        ))
-    })?;
-    let mut payload = vec![0u8; payload_len];
-    reader.seek(SeekFrom::Start(raw.payload_offset))?;
-    reader.read_exact(&mut payload)?;
+    let payload = subarchive_payload_slice(archive_bytes, raw)?;
 
-    let Some(cdr_offset) = find_zip_central_directory_offset(&payload)? else {
+    let Some(cdr_offset) = find_zip_central_directory_offset(payload)? else {
         return Ok(Vec::new());
     };
     let mut cursor = cdr_offset;
@@ -1849,24 +1949,24 @@ fn read_socpak_extension_entries<R: Read + Seek>(
         .checked_add(46)
         .is_some_and(|end| end <= payload.len())
     {
-        if read_u32_le(&payload, cursor)? != 0x0201_4b50 {
+        if read_u32_le(payload,cursor)? != 0x0201_4b50 {
             break;
         }
 
-        let compression_method_raw = read_u16_le(&payload, cursor + 10)?;
+        let compression_method_raw = read_u16_le(payload,cursor + 10)?;
         let compression_method = match CompressionMethod::try_from(compression_method_raw) {
             Ok(method) => method,
             Err(_) => break,
         };
-        let last_mod_file_time = read_u16_le(&payload, cursor + 12)?;
-        let last_mod_file_date = read_u16_le(&payload, cursor + 14)?;
-        let crc32 = read_u32_le(&payload, cursor + 16)?;
-        let mut compressed_size = read_u32_le(&payload, cursor + 20)? as u64;
-        let mut uncompressed_size = read_u32_le(&payload, cursor + 24)? as u64;
-        let name_len = read_u16_le(&payload, cursor + 28)? as usize;
-        let extra_len = read_u16_le(&payload, cursor + 30)? as usize;
-        let comment_len = read_u16_le(&payload, cursor + 32)? as usize;
-        let mut local_header_offset = read_u32_le(&payload, cursor + 42)? as u64;
+        let last_mod_file_time = read_u16_le(payload,cursor + 12)?;
+        let last_mod_file_date = read_u16_le(payload,cursor + 14)?;
+        let crc32 = read_u32_le(payload,cursor + 16)?;
+        let mut compressed_size = read_u32_le(payload,cursor + 20)? as u64;
+        let mut uncompressed_size = read_u32_le(payload,cursor + 24)? as u64;
+        let name_len = read_u16_le(payload,cursor + 28)? as usize;
+        let extra_len = read_u16_le(payload,cursor + 30)? as usize;
+        let comment_len = read_u16_le(payload,cursor + 32)? as usize;
+        let mut local_header_offset = read_u32_le(payload,cursor + 42)? as u64;
         let name_start = cursor + 46;
         let name_end = name_start.checked_add(name_len).ok_or_else(|| {
             Error::Io(io::Error::new(
@@ -1912,7 +2012,7 @@ fn read_socpak_extension_entries<R: Read + Seek>(
                     format!("socpak {} local header offset overflows usize", raw.name),
                 ))
             })?;
-            let data_offset = zip_local_data_offset(&payload, local_header_offset_usize)?;
+            let data_offset = zip_local_data_offset(payload,local_header_offset_usize)?;
             let absolute_offset = raw
                 .payload_offset
                 .checked_add(data_offset as u64)
@@ -2307,13 +2407,17 @@ fn try_clone_prefix_linux(
     Ok(true)
 }
 
+/// Maximum bytes per individual `copy_file_range` syscall.
 #[cfg(target_os = "linux")]
-fn try_copy_file_range_prefix_linux(
-    source: &File,
-    destination: &mut File,
-    expected_len: u64,
-    mut progress: impl FnMut(u64),
-) -> Result<bool> {
+const COPY_FILE_RANGE_CHUNK: u64 = 1 << 30;
+
+/// Issue a single `copy_file_range` call at an explicit offset.
+///
+/// Returns `Ok(None)` if the kernel rejects the call (cross-device, unsupported
+/// filesystem) — the caller treats that as "fall back to a buffered copy".
+/// `EINTR` is retried transparently.
+#[cfg(target_os = "linux")]
+fn copy_file_range_at(src_fd: c_int, dst_fd: c_int, offset: u64, len: usize) -> Option<isize> {
     unsafe extern "C" {
         fn copy_file_range(
             fd_in: c_int,
@@ -2324,7 +2428,90 @@ fn try_copy_file_range_prefix_linux(
             flags: u32,
         ) -> isize;
     }
+    loop {
+        let mut off_in = offset as i64;
+        let mut off_out = offset as i64;
+        let result =
+            unsafe { copy_file_range(src_fd, &mut off_in, dst_fd, &mut off_out, len, 0) };
+        if result < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        return Some(result);
+    }
+}
 
+/// Copy the half-open byte range `[start, end)` from `src_fd` to `dst_fd` using
+/// positioned `copy_file_range` calls. Safe to run concurrently with other
+/// non-overlapping ranges over the same descriptors.
+#[cfg(target_os = "linux")]
+fn copy_file_range_segment(src_fd: c_int, dst_fd: c_int, start: u64, end: u64) -> Result<()> {
+    let mut pos = start;
+    while pos < end {
+        let len = (end - pos).min(COPY_FILE_RANGE_CHUNK) as usize;
+        match copy_file_range_at(src_fd, dst_fd, pos, len) {
+            Some(n) if n > 0 => pos += n as u64,
+            Some(_) => {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("source ended at offset {pos} during copy"),
+                )));
+            }
+            None => {
+                return Err(Error::Io(io::Error::last_os_error()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Choose how many workers to fan a payload copy across. Small copies stay
+/// single-threaded; larger ones scale up to keep the device queue busy without
+/// oversubscribing.
+#[cfg(target_os = "linux")]
+fn copy_worker_count(remaining: u64) -> usize {
+    const MIN_PARALLEL: u64 = 512 * 1024 * 1024;
+    if remaining < MIN_PARALLEL {
+        return 1;
+    }
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let by_size = (remaining / COPY_FILE_RANGE_CHUNK).max(1) as usize;
+    cpus.clamp(1, 8).min(by_size).max(1)
+}
+
+/// Split `[start, end)` into at most `parts` contiguous, non-overlapping ranges.
+#[cfg(target_os = "linux")]
+fn split_copy_ranges(start: u64, end: u64, parts: usize) -> Vec<(u64, u64)> {
+    let total = end.saturating_sub(start);
+    let parts = parts.max(1) as u64;
+    let base = total / parts;
+    let mut ranges = Vec::new();
+    let mut pos = start;
+    for i in 0..parts {
+        let next = if i + 1 == parts { end } else { pos + base };
+        if next > pos {
+            ranges.push((pos, next));
+        }
+        pos = next;
+    }
+    if ranges.is_empty() && end > start {
+        ranges.push((start, end));
+    }
+    ranges
+}
+
+#[cfg(target_os = "linux")]
+fn try_copy_file_range_prefix_linux(
+    source: &File,
+    destination: &mut File,
+    expected_len: u64,
+    mut progress: impl FnMut(u64),
+) -> Result<bool> {
     if expected_len == 0 {
         return Ok(true);
     }
@@ -2335,41 +2522,81 @@ fn try_copy_file_range_prefix_linux(
         )));
     }
 
-    let mut offset_in = 0i64;
-    let mut offset_out = 0i64;
-    let mut copied = 0u64;
-    while copied < expected_len {
-        let remaining = expected_len - copied;
-        let len = remaining.min(1 << 30) as usize;
-        let result = unsafe {
-            copy_file_range(
-                source.as_raw_fd(),
-                &mut offset_in,
-                destination.as_raw_fd(),
-                &mut offset_out,
-                len,
-                0,
-            )
-        };
-        if result < 0 {
-            if copied != 0 {
-                destination.set_len(0)?;
-                destination.seek(SeekFrom::Start(0))?;
-                return Ok(false);
-            }
-            return Ok(false);
-        }
-        if result == 0 {
-            destination.set_len(0)?;
-            destination.seek(SeekFrom::Start(0))?;
+    let src_fd = source.as_raw_fd();
+    let dst_fd = destination.as_raw_fd();
+
+    // Probe support with a single call. If the kernel rejects copy_file_range,
+    // nothing was written; report no progress and let the caller fall back to a
+    // buffered copy.
+    let probe_len = expected_len.min(COPY_FILE_RANGE_CHUNK) as usize;
+    let mut copied = match copy_file_range_at(src_fd, dst_fd, 0, probe_len) {
+        None => return Ok(false),
+        Some(0) => {
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("source ended after {copied} bytes, expected {expected_len} bytes"),
+                format!("source ended before any bytes were copied (expected {expected_len})"),
             )));
         }
-        copied = copied.checked_add(result as u64).ok_or_else(|| {
-            Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "copy overflow"))
-        })?;
+        Some(n) => n as u64,
+    };
+    progress(copied);
+
+    if copied >= expected_len {
+        destination.seek(SeekFrom::Start(expected_len))?;
+        return Ok(true);
+    }
+
+    // Pre-size the destination so concurrent positioned writes never race on the
+    // file's size, then copy the remainder in parallel waves. copy_file_range
+    // with explicit offsets ignores the descriptor's file position, so workers
+    // can safely share `src_fd`/`dst_fd`.
+    destination.set_len(expected_len)?;
+    let worker_count = copy_worker_count(expected_len - copied);
+
+    while copied < expected_len {
+        let wave_end = copied
+            .saturating_add(COPY_FILE_RANGE_CHUNK.saturating_mul(worker_count as u64))
+            .min(expected_len);
+        let ranges = split_copy_ranges(copied, wave_end, worker_count);
+
+        let mut first_err: Option<Error> = None;
+        if ranges.len() == 1 {
+            let (start, end) = ranges[0];
+            if let Err(e) = copy_file_range_segment(src_fd, dst_fd, start, end) {
+                first_err = Some(e);
+            }
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = ranges
+                    .iter()
+                    .map(|&(start, end)| {
+                        scope.spawn(move || copy_file_range_segment(src_fd, dst_fd, start, end))
+                    })
+                    .collect();
+                for handle in handles {
+                    match handle.join() {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                        Err(_) => {
+                            if first_err.is_none() {
+                                first_err = Some(Error::Io(io::Error::other(
+                                    "parallel copy worker panicked",
+                                )));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        copied = wave_end;
         progress(copied);
     }
 
@@ -5111,7 +5338,6 @@ mod nested_expansion_tests {
     //! and the supporting ZIP/byte parsing helpers.
     use super::*;
     use sha2::{Digest, Sha256};
-    use std::io::Cursor;
 
     // ------------------------------------------------------------------
     // Fixture helpers
@@ -5605,10 +5831,9 @@ mod nested_expansion_tests {
         let pad = 4096u64;
         let mut buffer = vec![0xABu8; pad as usize];
         buffer.extend_from_slice(&zip);
-        let mut reader = Cursor::new(buffer);
 
         let raw = raw_ref("Sub/obj.socpak", pad, zip.len() as u64);
-        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        let entries = read_socpak_extension_entries(&buffer, &raw).unwrap();
         assert_eq!(entries.len(), 1);
 
         let entry = &entries[0];
@@ -5637,9 +5862,8 @@ mod nested_expansion_tests {
             ZipMember { name: "Data/", data: None, crc32: 0, time: 0, date: 0 },
         ]);
 
-        let mut reader = Cursor::new(zip.clone());
         let raw = raw_ref("obj.socpak", 0, zip.len() as u64);
-        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        let entries = read_socpak_extension_entries(&zip, &raw).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "Data/a.bin");
     }
@@ -5647,19 +5871,117 @@ mod nested_expansion_tests {
     #[test]
     fn read_socpak_extension_entries_returns_empty_without_eocd() {
         let payload = vec![0u8; 128];
-        let mut reader = Cursor::new(payload.clone());
         let raw = raw_ref("obj.socpak", 0, payload.len() as u64);
-        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        let entries = read_socpak_extension_entries(&payload, &raw).unwrap();
         assert!(entries.is_empty());
     }
 
     #[test]
     fn read_subarchive_extension_entries_returns_empty_for_unparseable_payload() {
         let payload = vec![0u8; 256];
-        let mut reader = Cursor::new(payload.clone());
         let raw = raw_ref("cache.p4k_subarchive.zst", 0, payload.len() as u64);
-        let entries = read_subarchive_extension_entries(&mut reader, &raw).unwrap();
+        let entries = read_subarchive_extension_entries(&payload, &raw).unwrap();
         assert!(entries.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // parallel payload copy partitioning
+    // ------------------------------------------------------------------
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn split_copy_ranges_covers_range_contiguously() {
+        // Even split.
+        assert_eq!(
+            split_copy_ranges(0, 4000, 4),
+            vec![(0, 1000), (1000, 2000), (2000, 3000), (3000, 4000)]
+        );
+
+        // Non-divisible: the trailing remainder folds into the final range, and
+        // the partition stays contiguous, ordered, gap-free, and fully covering.
+        let ranges = split_copy_ranges(100, 1100, 3);
+        assert!(ranges.len() <= 3);
+        let mut prev = 100;
+        for &(start, end) in &ranges {
+            assert_eq!(start, prev);
+            assert!(end > start);
+            prev = end;
+        }
+        assert_eq!(prev, 1100);
+
+        // More parts than bytes collapses without panicking or leaving gaps.
+        let ranges = split_copy_ranges(0, 2, 8);
+        let mut prev = 0;
+        for &(start, end) in &ranges {
+            assert_eq!(start, prev);
+            prev = end;
+        }
+        assert_eq!(prev, 2);
+
+        // An empty range produces no work.
+        assert!(split_copy_ranges(10, 10, 4).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_worker_count_scales_within_bounds() {
+        // Below the parallel threshold the copy stays single-threaded.
+        assert_eq!(copy_worker_count(0), 1);
+        assert_eq!(copy_worker_count(64 * 1024 * 1024), 1);
+        assert_eq!(copy_worker_count(511 * 1024 * 1024), 1);
+        // Large copies fan out, but never below 1 nor above the 8-worker cap.
+        let big = copy_worker_count(64u64 * 1024 * 1024 * 1024);
+        assert!((1..=8).contains(&big));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copy_file_range_segment_reassembles_payload() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::unix::io::AsRawFd;
+
+        // Deterministic pseudo-random source content spanning several chunks.
+        let len: usize = 5 * 1024 * 1024 + 777;
+        let mut content = vec![0u8; len];
+        let mut state: u32 = 0x1234_5678;
+        for byte in content.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let src_path = dir.join(format!("svarog_cfr_src_{pid}.bin"));
+        let dst_path = dir.join(format!("svarog_cfr_dst_{pid}.bin"));
+
+        let mut src = File::create(&src_path).unwrap();
+        src.write_all(&content).unwrap();
+        src.flush().unwrap();
+        let src = File::open(&src_path).unwrap();
+        let dst = File::create(&dst_path).unwrap();
+        dst.set_len(len as u64).unwrap();
+
+        // Copy the payload as several independent positioned segments, mirroring
+        // what the parallel worker fan-out does for each range.
+        let ranges = split_copy_ranges(0, len as u64, 3);
+        assert!(ranges.len() >= 2);
+        for &(start, end) in &ranges {
+            copy_file_range_segment(src.as_raw_fd(), dst.as_raw_fd(), start, end).unwrap();
+        }
+
+        let mut readback = Vec::new();
+        let mut dst = File::open(&dst_path).unwrap();
+        dst.seek(SeekFrom::Start(0)).unwrap();
+        dst.read_to_end(&mut readback).unwrap();
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
+
+        assert_eq!(readback.len(), len);
+        assert_eq!(
+            readback, content,
+            "segmented copy must reassemble byte-for-byte"
+        );
     }
 
     // ------------------------------------------------------------------
