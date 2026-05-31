@@ -1923,6 +1923,7 @@ fn cmd_p4k_convert_v2(
             P4kConvertProgress::CopyFinished { bytes, method } => {
                 let method = match method {
                     P4kConvertCopyMethod::Reflink => "reflink",
+                    P4kConvertCopyMethod::DirectIo => "parallel O_DIRECT",
                     P4kConvertCopyMethod::CopyFileRange => "copy_file_range",
                     P4kConvertCopyMethod::Buffered => "buffered copy",
                     P4kConvertCopyMethod::Empty => "no payload",

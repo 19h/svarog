@@ -98,6 +98,9 @@ pub struct P4kWriteStats {
 pub enum P4kConvertCopyMethod {
     /// Linux reflink/FICLONE cloned the prefix extents.
     Reflink,
+    /// Parallel `O_DIRECT` copy bypassing the page cache and inode-lock
+    /// serialization (Linux).
+    DirectIo,
     /// Linux `copy_file_range` copied the prefix in-kernel.
     CopyFileRange,
     /// Portable buffered userspace copy.
@@ -1425,6 +1428,21 @@ where
                     bytes: payload_end_unaligned,
                     method: P4kConvertCopyMethod::Reflink,
                 });
+            } else if try_direct_parallel_prefix_with_progress(
+                &input_file,
+                &mut file,
+                payload_end_unaligned,
+                |copied| {
+                    progress(P4kConvertProgress::CopyProgress {
+                        copied,
+                        total: payload_end_unaligned,
+                    });
+                },
+            )? {
+                progress(P4kConvertProgress::CopyFinished {
+                    bytes: payload_end_unaligned,
+                    method: P4kConvertCopyMethod::DirectIo,
+                });
             } else if try_copy_file_range_prefix_with_progress(
                 &input_file,
                 &mut file,
@@ -2380,6 +2398,32 @@ where
     }
 }
 
+/// Copy the payload prefix with parallel `O_DIRECT` reads/writes.
+///
+/// Returns `Ok(false)` when the strategy does not apply (non-Linux, too small,
+/// or the filesystem rejects `O_DIRECT`/`fallocate`), so the caller can fall
+/// back to `copy_file_range`.
+fn try_direct_parallel_prefix_with_progress<F>(
+    source: &File,
+    destination: &mut File,
+    expected_len: u64,
+    progress: F,
+) -> Result<bool>
+where
+    F: FnMut(u64),
+{
+    #[cfg(target_os = "linux")]
+    {
+        try_direct_parallel_prefix_linux(source, destination, expected_len, progress)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, destination, expected_len, progress);
+        Ok(false)
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn try_clone_prefix_linux(
     source: &File,
@@ -2600,6 +2644,313 @@ fn try_copy_file_range_prefix_linux(
         progress(copied);
     }
 
+    destination.seek(SeekFrom::Start(expected_len))?;
+    Ok(true)
+}
+
+/// `O_DIRECT` flag value on Linux for the common architectures (x86, x86_64,
+/// arm, aarch64). Used to reopen descriptors with direct-IO semantics.
+#[cfg(target_os = "linux")]
+const O_DIRECT_FLAG: i32 = 0x4000;
+
+/// Direct-IO alignment for offsets, lengths, and buffers. 4096 is a multiple of
+/// every common logical sector / filesystem block size.
+#[cfg(target_os = "linux")]
+const DIRECT_ALIGN: u64 = 4096;
+
+/// Per-worker direct-IO transfer buffer (block-aligned).
+#[cfg(target_os = "linux")]
+const DIRECT_BUF_SIZE: usize = 16 * 1024 * 1024;
+
+/// Minimum prefix length before the parallel direct-IO path is worthwhile.
+#[cfg(target_os = "linux")]
+const DIRECT_MIN_LEN: u64 = 256 * 1024 * 1024;
+
+/// A heap buffer aligned to `align` bytes, required for `O_DIRECT` transfers.
+#[cfg(target_os = "linux")]
+struct AlignedBuf {
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
+    layout: std::alloc::Layout,
+}
+
+#[cfg(target_os = "linux")]
+impl AlignedBuf {
+    fn new(len: usize, align: usize) -> Option<Self> {
+        let layout = std::alloc::Layout::from_size_align(len, align).ok()?;
+        // SAFETY: `layout` has non-zero size (callers pass len > 0).
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        let ptr = std::ptr::NonNull::new(ptr)?;
+        Some(Self { ptr, len, layout })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: `ptr` is a unique, valid allocation of `len` bytes.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: `ptr`/`layout` come from a matching `alloc` in `new`.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+    }
+}
+
+// SAFETY: an `AlignedBuf` owns a unique heap allocation with no thread-affine
+// state, so moving it (or a worker holding one) across threads is sound.
+#[cfg(target_os = "linux")]
+unsafe impl Send for AlignedBuf {}
+
+/// Reopen an existing descriptor with `O_DIRECT` via `/proc/self/fd`, yielding
+/// an independent `File` (own offset and flags) over the same inode.
+#[cfg(target_os = "linux")]
+fn reopen_direct(fd: c_int, write: bool) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = OpenOptions::new();
+    if write {
+        opts.write(true);
+    } else {
+        opts.read(true);
+    }
+    opts.custom_flags(O_DIRECT_FLAG);
+    opts.open(format!("/proc/self/fd/{fd}"))
+}
+
+/// Allocate real blocks for `[0, len)` so direct-IO overwrites never extend the
+/// file (which would force exclusive inode locking and serialize the workers).
+#[cfg(target_os = "linux")]
+fn fallocate_full(file: &File, len: u64) -> bool {
+    unsafe extern "C" {
+        fn fallocate(fd: c_int, mode: c_int, offset: i64, len: i64) -> c_int;
+    }
+    if len > i64::MAX as u64 {
+        return false;
+    }
+    // SAFETY: plain syscall wrapper over an owned descriptor.
+    let result = unsafe { fallocate(file.as_raw_fd(), 0, 0, len as i64) };
+    result == 0
+}
+
+/// Partition `[0, total)` (a multiple of `align`) into `parts` block-aligned,
+/// contiguous, non-overlapping ranges.
+#[cfg(target_os = "linux")]
+fn split_aligned_ranges(total: u64, parts: usize, align: u64) -> Vec<(u64, u64)> {
+    let parts = parts.max(1) as u64;
+    let blocks = total / align;
+    let base = blocks / parts;
+    let mut ranges = Vec::new();
+    let mut pos = 0u64;
+    for i in 0..parts {
+        let next = if i + 1 == parts { blocks } else { pos + base };
+        if next > pos {
+            ranges.push((pos * align, next * align));
+        }
+        pos = next;
+    }
+    if ranges.is_empty() && total > 0 {
+        ranges.push((0, total));
+    }
+    ranges
+}
+
+/// Copy block-aligned range `[start, end)` between direct-IO descriptors.
+#[cfg(target_os = "linux")]
+fn copy_direct_segment(
+    src: &File,
+    dst: &File,
+    start: u64,
+    end: u64,
+    progress: &AtomicU64,
+    abort: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    let mut buf = AlignedBuf::new(DIRECT_BUF_SIZE, DIRECT_ALIGN as usize).ok_or_else(|| {
+        Error::Io(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "aligned direct-IO buffer allocation failed",
+        ))
+    })?;
+
+    let mut pos = start;
+    while pos < end {
+        if abort.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        // `want` stays block-aligned: start, end and DIRECT_BUF_SIZE are all
+        // multiples of DIRECT_ALIGN.
+        let want = (end - pos).min(DIRECT_BUF_SIZE as u64) as usize;
+        let slice = &mut buf.as_mut_slice()[..want];
+
+        let mut filled = 0usize;
+        while filled < want {
+            let n = src.read_at(&mut slice[filled..], pos + filled as u64)?;
+            if n == 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("source ended at {} during direct copy", pos + filled as u64),
+                )));
+            }
+            filled += n;
+        }
+
+        let mut written = 0usize;
+        while written < want {
+            let n = dst.write_at(&slice[written..], pos + written as u64)?;
+            if n == 0 {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "direct write made no progress",
+                )));
+            }
+            written += n;
+        }
+
+        pos += want as u64;
+        progress.fetch_add(want as u64, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Copy the sub-block tail `[start, end)` (< one block) through the buffered
+/// descriptors, since `O_DIRECT` cannot transfer partial blocks.
+#[cfg(target_os = "linux")]
+fn copy_tail_buffered(source: &File, destination: &File, start: u64, end: u64) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    let len = (end - start) as usize;
+    let mut buf = vec![0u8; len];
+
+    let mut filled = 0usize;
+    while filled < len {
+        let n = source.read_at(&mut buf[filled..], start + filled as u64)?;
+        if n == 0 {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source ended during tail copy",
+            )));
+        }
+        filled += n;
+    }
+
+    let mut written = 0usize;
+    while written < len {
+        let n = destination.write_at(&buf[written..], start + written as u64)?;
+        if n == 0 {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "tail write made no progress",
+            )));
+        }
+        written += n;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_direct_parallel_prefix_linux(
+    source: &File,
+    destination: &mut File,
+    expected_len: u64,
+    mut progress: impl FnMut(u64),
+) -> Result<bool> {
+    use std::sync::atomic::AtomicBool;
+
+    if expected_len < DIRECT_MIN_LEN {
+        return Ok(false);
+    }
+    let aligned_len = expected_len & !(DIRECT_ALIGN - 1);
+    if aligned_len == 0 {
+        return Ok(false);
+    }
+
+    // Reopen both files with O_DIRECT. Filesystems that reject direct IO
+    // (tmpfs, some network mounts) fail here and we fall back cleanly without
+    // having touched the destination.
+    let src_direct = match reopen_direct(source.as_raw_fd(), false) {
+        Ok(file) => file,
+        Err(_) => return Ok(false),
+    };
+    let dst_direct = match reopen_direct(destination.as_raw_fd(), true) {
+        Ok(file) => file,
+        Err(_) => return Ok(false),
+    };
+
+    // Allocate the destination so direct writes are non-extending overwrites,
+    // which the kernel can service concurrently (shared inode lock).
+    if !fallocate_full(destination, expected_len) {
+        destination.set_len(0)?;
+        destination.seek(SeekFrom::Start(0))?;
+        return Ok(false);
+    }
+
+    let worker_count = copy_worker_count(aligned_len).max(1);
+    let ranges = split_aligned_ranges(aligned_len, worker_count, DIRECT_ALIGN);
+
+    let counter = AtomicU64::new(0);
+    let abort = AtomicBool::new(false);
+    let mut worker_err: Option<Error> = None;
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = ranges
+            .iter()
+            .map(|&(start, end)| {
+                let src = &src_direct;
+                let dst = &dst_direct;
+                let counter = &counter;
+                let abort = &abort;
+                scope.spawn(move || {
+                    let result = copy_direct_segment(src, dst, start, end, counter, abort);
+                    if result.is_err() {
+                        abort.store(true, Ordering::Relaxed);
+                    }
+                    result
+                })
+            })
+            .collect();
+
+        loop {
+            let done = counter.load(Ordering::Relaxed);
+            progress(done.min(aligned_len));
+            if done >= aligned_len || abort.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if worker_err.is_none() {
+                        worker_err = Some(e);
+                    }
+                }
+                Err(_) => {
+                    if worker_err.is_none() {
+                        worker_err =
+                            Some(Error::Io(io::Error::other("direct copy worker panicked")));
+                    }
+                }
+            }
+        }
+    });
+
+    if let Some(e) = worker_err {
+        return Err(e);
+    }
+
+    // Direct writes are durable on completion; copy the sub-block tail (if any)
+    // through the buffered descriptors before handing back to the tail writer.
+    drop(dst_direct);
+    drop(src_direct);
+
+    if aligned_len < expected_len {
+        copy_tail_buffered(source, destination, aligned_len, expected_len)?;
+    }
+
+    progress(expected_len);
     destination.seek(SeekFrom::Start(expected_len))?;
     Ok(true)
 }
@@ -5981,6 +6332,118 @@ mod nested_expansion_tests {
         assert_eq!(
             readback, content,
             "segmented copy must reassemble byte-for-byte"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn split_aligned_ranges_are_block_aligned_and_cover() {
+        let align = DIRECT_ALIGN;
+        let total = align * 10; // 10 blocks
+
+        let ranges = split_aligned_ranges(total, 4, align);
+        assert!(ranges.len() <= 4);
+        let mut prev = 0;
+        for &(start, end) in &ranges {
+            assert_eq!(start, prev);
+            assert!(end > start);
+            assert_eq!(start % align, 0, "range start must be block-aligned");
+            assert_eq!(end % align, 0, "range end must be block-aligned");
+            prev = end;
+        }
+        assert_eq!(prev, total, "ranges must cover the whole region");
+
+        // More parts than blocks: still aligned, contiguous, fully covering.
+        let ranges = split_aligned_ranges(align * 2, 8, align);
+        let mut prev = 0;
+        for &(start, end) in &ranges {
+            assert_eq!(start, prev);
+            assert_eq!(start % align, 0);
+            assert_eq!(end % align, 0);
+            prev = end;
+        }
+        assert_eq!(prev, align * 2);
+
+        assert!(split_aligned_ranges(0, 4, align).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_segment_copy_roundtrips_when_supported() {
+        use std::io::{Read, Write};
+        use std::os::unix::io::AsRawFd;
+        use std::sync::atomic::AtomicBool;
+
+        // Block-aligned body across several blocks, plus a sub-block tail.
+        let body = 3 * DIRECT_ALIGN as usize;
+        let tail = 1000usize;
+        let len = body + tail;
+        let mut content = vec![0u8; len];
+        let mut state: u32 = 0x9e37_79b9;
+        for byte in content.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let src_path = dir.join(format!("svarog_odirect_src_{pid}.bin"));
+        let dst_path = dir.join(format!("svarog_odirect_dst_{pid}.bin"));
+
+        {
+            let mut f = File::create(&src_path).unwrap();
+            f.write_all(&content).unwrap();
+            f.flush().unwrap();
+        }
+        let source = File::open(&src_path).unwrap();
+        let destination = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dst_path)
+            .unwrap();
+
+        // Skip cleanly if the temp filesystem rejects O_DIRECT (e.g. tmpfs).
+        let directs = (
+            reopen_direct(source.as_raw_fd(), false),
+            reopen_direct(destination.as_raw_fd(), true),
+        );
+        let (src_direct, dst_direct) = match directs {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                let _ = std::fs::remove_file(&src_path);
+                let _ = std::fs::remove_file(&dst_path);
+                return;
+            }
+        };
+        assert!(fallocate_full(&destination, len as u64));
+
+        let counter = AtomicU64::new(0);
+        let abort = AtomicBool::new(false);
+        for &(start, end) in &split_aligned_ranges(body as u64, 2, DIRECT_ALIGN) {
+            copy_direct_segment(&src_direct, &dst_direct, start, end, &counter, &abort).unwrap();
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), body as u64);
+        drop(dst_direct);
+        drop(src_direct);
+
+        copy_tail_buffered(&source, &destination, body as u64, len as u64).unwrap();
+        destination.sync_all().unwrap();
+
+        let mut readback = Vec::new();
+        File::open(&dst_path)
+            .unwrap()
+            .read_to_end(&mut readback)
+            .unwrap();
+
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
+
+        assert_eq!(readback.len(), len);
+        assert_eq!(
+            readback, content,
+            "parallel O_DIRECT body + buffered tail must reassemble byte-for-byte"
         );
     }
 
