@@ -5102,3 +5102,592 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod nested_expansion_tests {
+    //! Tests for the nested-P4K / container expansion added to v2 conversion:
+    //! classifying `.p4k_subarchive.zst`, `.socpak`, and `.pak` containers,
+    //! splitting their nested payloads into virtual "extension" index entries,
+    //! and the supporting ZIP/byte parsing helpers.
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    // ------------------------------------------------------------------
+    // Fixture helpers
+    // ------------------------------------------------------------------
+
+    /// Build a `V2EntryMeta` with the given name and payload placement; all
+    /// other metadata is zeroed. Used to drive `split_container_extension_entries`.
+    fn meta(name: &str, offset: u64, size: u64) -> V2EntryMeta {
+        V2EntryMeta {
+            name: name.to_string(),
+            offset_to_file_data: offset,
+            compressed_size: size,
+            uncompressed_size: size,
+            compression_method: CompressionMethod::Store,
+            crc32: 0,
+            last_mod_file_time: 0,
+            last_mod_file_date: 0,
+            encrypted: false,
+            signature: [0u8; 128],
+            sha256: [0u8; 32],
+            bytes_already_written: size,
+        }
+    }
+
+    /// Construct a raw v1 entry reference pointing at a payload window.
+    /// Mirrors the field layout of the existing `test_raw_entry` helper.
+    fn raw_ref(name: &str, payload_offset: u64, payload_len: u64) -> crate::archive::P4kRawEntryRef<'_> {
+        crate::archive::P4kRawEntryRef {
+            name,
+            payload_len,
+            local_header_offset: payload_offset.saturating_sub(DEFAULT_SECTOR_SIZE),
+            payload_offset,
+            local_record_size: DEFAULT_SECTOR_SIZE,
+            uncompressed_size: payload_len,
+            compression_method: CompressionMethod::Store,
+            is_encrypted: false,
+            crc32: 0,
+            last_mod_file_time: 0,
+            last_mod_file_date: 0,
+            signature: [0u8; 128],
+            sha256: [0u8; 32],
+            bytes_already_written: payload_len,
+        }
+    }
+
+    /// One member of a synthetic ZIP. `data == None` encodes a directory entry
+    /// (zero length, name ends with `/`).
+    struct ZipMember<'a> {
+        name: &'a str,
+        data: Option<&'a [u8]>,
+        crc32: u32,
+        time: u16,
+        date: u16,
+    }
+
+    /// Assemble a minimal, store-only ZIP archive (local headers + central
+    /// directory + EOCD) the same way `read_socpak_extension_entries` walks it.
+    fn build_zip(members: &[ZipMember<'_>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // (name, size, lho) recorded for the central directory pass.
+        let mut centrals: Vec<(String, u32, u32)> = Vec::new();
+
+        for member in members {
+            let lho = buf.len() as u32;
+            if let Some(data) = member.data {
+                buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // local sig
+                buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+                buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+                buf.extend_from_slice(&0u16.to_le_bytes()); // method (store)
+                buf.extend_from_slice(&member.time.to_le_bytes());
+                buf.extend_from_slice(&member.date.to_le_bytes());
+                buf.extend_from_slice(&member.crc32.to_le_bytes());
+                buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp size
+                buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp size
+                buf.extend_from_slice(&(member.name.len() as u16).to_le_bytes());
+                buf.extend_from_slice(&0u16.to_le_bytes()); // extra len
+                buf.extend_from_slice(member.name.as_bytes());
+                buf.extend_from_slice(data);
+                centrals.push((member.name.to_string(), data.len() as u32, lho));
+            } else {
+                centrals.push((member.name.to_string(), 0, lho));
+            }
+        }
+
+        let cd_start = buf.len() as u32;
+        for (member, central) in members.iter().zip(&centrals) {
+            let (name, size, lho) = central;
+            buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes()); // central sig
+            buf.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+            buf.extend_from_slice(&0u16.to_le_bytes()); // method (store)
+            buf.extend_from_slice(&member.time.to_le_bytes());
+            buf.extend_from_slice(&member.date.to_le_bytes());
+            buf.extend_from_slice(&member.crc32.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes()); // comp size
+            buf.extend_from_slice(&size.to_le_bytes()); // uncomp size
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+            buf.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            buf.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            buf.extend_from_slice(&lho.to_le_bytes()); // local header offset
+            buf.extend_from_slice(name.as_bytes());
+        }
+        let cd_size = buf.len() as u32 - cd_start;
+
+        buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // EOCD sig
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        buf.extend_from_slice(&(centrals.len() as u16).to_le_bytes()); // entries this disk
+        buf.extend_from_slice(&(centrals.len() as u16).to_le_bytes()); // total entries
+        buf.extend_from_slice(&cd_size.to_le_bytes());
+        buf.extend_from_slice(&cd_start.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        buf
+    }
+
+    // ------------------------------------------------------------------
+    // Container name classification
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn suffix_classifiers_match_case_insensitively() {
+        assert!(is_p4k_subarchive_zst_name("Data/foo.p4k_subarchive.zst"));
+        assert!(is_p4k_subarchive_zst_name("Data/foo.P4K_SUBARCHIVE.ZST"));
+        assert!(!is_p4k_subarchive_zst_name("Data/foo.zst"));
+        assert!(!is_p4k_subarchive_zst_name("Data/foo.p4k_subarchive"));
+
+        assert!(is_socpak_name("Data/obj.socpak"));
+        assert!(is_socpak_name("Data/obj.SocPak"));
+        assert!(!is_socpak_name("Data/obj.pak"));
+        assert!(!is_socpak_name("socpak"));
+
+        assert!(is_pak_name("Data/shaders.pak"));
+        assert!(is_pak_name("Data/shaders.PAK"));
+        // ".socpak" ends in "cpak", not ".pak".
+        assert!(!is_pak_name("Data/obj.socpak"));
+        assert!(!is_pak_name("pak"));
+
+        // Names shorter than the suffix never match (saturating_sub guard).
+        assert!(!is_pak_name("ak"));
+        assert!(!is_socpak_name(""));
+        assert!(!is_p4k_subarchive_zst_name(".zst"));
+    }
+
+    #[test]
+    fn nested_container_name_covers_all_three_families() {
+        assert!(is_nested_archive_container_name("a.p4k_subarchive.zst"));
+        assert!(is_nested_archive_container_name("a.socpak"));
+        assert!(is_nested_archive_container_name("a.pak"));
+        assert!(!is_nested_archive_container_name("a.dds"));
+        assert!(!is_nested_archive_container_name("a.xml"));
+    }
+
+    // ------------------------------------------------------------------
+    // Virtual path construction
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn subarchive_virtual_name_prefixes_engine_for_shadercache_shaders() {
+        let name = p4k_subarchive_virtual_name(
+            "Engine/ShaderCache_PC/cache.p4k_subarchive.zst",
+            "Shaders/foo.bin",
+        );
+        assert_eq!(name, "Engine/Shaders/foo.bin");
+
+        // Container and inner prefix match is case-insensitive; inner case kept.
+        let name = p4k_subarchive_virtual_name(
+            "engine/shadercache_pc/cache.p4k_subarchive.zst",
+            "shaders/Bar.bin",
+        );
+        assert_eq!(name, "Engine/shaders/Bar.bin");
+    }
+
+    #[test]
+    fn subarchive_virtual_name_passes_through_non_shadercache() {
+        // Container is not a shader cache.
+        assert_eq!(
+            p4k_subarchive_virtual_name("Data/cache.p4k_subarchive.zst", "Shaders/foo.bin"),
+            "Shaders/foo.bin"
+        );
+        // Inner path is not under Shaders/.
+        assert_eq!(
+            p4k_subarchive_virtual_name(
+                "Engine/ShaderCache_PC/cache.p4k_subarchive.zst",
+                "Textures/bar.dds"
+            ),
+            "Textures/bar.dds"
+        );
+    }
+
+    #[test]
+    fn subarchive_virtual_name_normalizes_backslashes() {
+        assert_eq!(
+            p4k_subarchive_virtual_name(
+                "Engine\\ShaderCache_PC\\cache.p4k_subarchive.zst",
+                "Shaders\\foo.bin"
+            ),
+            "Engine/Shaders/foo.bin"
+        );
+        assert_eq!(
+            p4k_subarchive_virtual_name("Data\\cache.p4k_subarchive.zst", "sub\\foo.bin"),
+            "sub/foo.bin"
+        );
+    }
+
+    #[test]
+    fn socpak_virtual_prefix_returns_directory_with_trailing_slash() {
+        assert_eq!(socpak_virtual_prefix("Data/Models/ship.socpak"), "Data/Models/");
+        assert_eq!(socpak_virtual_prefix("Data\\Models\\ship.socpak"), "Data/Models/");
+        assert_eq!(socpak_virtual_prefix("ship.socpak"), "");
+    }
+
+    // ------------------------------------------------------------------
+    // split_container_extension_entries
+    // ------------------------------------------------------------------
+
+    fn names(entries: &[V2EntryMeta]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn split_classifies_payload_inside_container_as_extension() {
+        let all = vec![
+            meta("a.socpak", 4096, 8192),    // container [4096, 12288)
+            meta("Data/x.dds", 5000, 100),   // inside the container
+            meta("b.bin", 16384, 100),       // standalone, aligned
+        ];
+        let (entries, extensions) = split_container_extension_entries(all, 4096).unwrap();
+        assert_eq!(names(&entries), vec!["a.socpak", "b.bin"]);
+        assert_eq!(names(&extensions), vec!["Data/x.dds"]);
+    }
+
+    #[test]
+    fn split_does_not_treat_a_container_as_nested_in_itself() {
+        // A lone container whose own range trivially "contains" itself must
+        // still be emitted as a normal entry, never as an extension entry.
+        let all = vec![meta("only.socpak", 4096, 4096)];
+        let (entries, extensions) = split_container_extension_entries(all, 4096).unwrap();
+        assert_eq!(names(&entries), vec!["only.socpak"]);
+        assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn split_rejects_unaligned_non_extension_entry() {
+        let all = vec![meta("x.bin", 100, 50)];
+        let result = split_container_extension_entries(all, 4096);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    #[test]
+    fn split_keeps_zero_size_entries_as_normal_without_alignment_check() {
+        let all = vec![meta("empty.bin", 12345, 0)];
+        let (entries, extensions) = split_container_extension_entries(all, 4096).unwrap();
+        assert_eq!(names(&entries), vec!["empty.bin"]);
+        assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn split_requires_container_name_not_just_containment() {
+        // `big.bin` spatially encloses `x.bin`, but is not a recognised
+        // container, so neither entry becomes an extension entry.
+        let all = vec![meta("big.bin", 4096, 8192), meta("x.bin", 8192, 100)];
+        let (entries, extensions) = split_container_extension_entries(all, 4096).unwrap();
+        assert_eq!(names(&entries), vec!["big.bin", "x.bin"]);
+        assert!(extensions.is_empty());
+    }
+
+    #[test]
+    fn split_handles_containers_nested_within_containers() {
+        let all = vec![
+            meta("outer.socpak", 4096, 20000), // [4096, 24096)
+            meta("inner.pak", 5000, 1000),     // container, inside outer
+            meta("deep.dds", 5200, 50),        // file inside inner/outer
+            meta("top.bin", 24576, 100),       // standalone, aligned
+        ];
+        let (entries, extensions) = split_container_extension_entries(all, 4096).unwrap();
+        assert_eq!(names(&entries), vec!["outer.socpak", "top.bin"]);
+        assert_eq!(names(&extensions), vec!["inner.pak", "deep.dds"]);
+    }
+
+    #[test]
+    fn split_reports_payload_range_overflow_for_container() {
+        let all = vec![meta("huge.socpak", u64::MAX, 1)];
+        let result = split_container_extension_entries(all, 4096);
+        assert!(matches!(result, Err(Error::Io(_))));
+    }
+
+    // ------------------------------------------------------------------
+    // Containment primitives
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn container_prefix_len_counts_starts_at_or_before() {
+        let containers = vec![
+            ContainerRange { index: 0, start: 10, end: 15 },
+            ContainerRange { index: 1, start: 20, end: 25 },
+            ContainerRange { index: 2, start: 30, end: 35 },
+        ];
+        assert_eq!(container_prefix_len_at_or_before(&containers, 5), 0);
+        assert_eq!(container_prefix_len_at_or_before(&containers, 10), 1);
+        assert_eq!(container_prefix_len_at_or_before(&containers, 19), 1);
+        assert_eq!(container_prefix_len_at_or_before(&containers, 20), 2);
+        assert_eq!(container_prefix_len_at_or_before(&containers, 30), 3);
+        assert_eq!(container_prefix_len_at_or_before(&containers, 100), 3);
+    }
+
+    #[test]
+    fn prefix_max_tracks_two_largest_distinct_containers() {
+        let containers = vec![
+            ContainerRange { index: 0, start: 0, end: 100 },
+            ContainerRange { index: 1, start: 10, end: 50 },
+            ContainerRange { index: 2, start: 20, end: 200 },
+        ];
+        let prefix = build_container_prefix_max(&containers);
+        assert_eq!(prefix.len(), 3);
+
+        assert_eq!(prefix[0].first_index, 0);
+        assert_eq!(prefix[0].first_end, 100);
+
+        assert_eq!(prefix[1].first_index, 0);
+        assert_eq!(prefix[1].first_end, 100);
+        assert_eq!(prefix[1].second_index, 1);
+        assert_eq!(prefix[1].second_end, 50);
+
+        // The new max (index 2) displaces the old max into the second slot.
+        assert_eq!(prefix[2].first_index, 2);
+        assert_eq!(prefix[2].first_end, 200);
+        assert_eq!(prefix[2].second_index, 0);
+        assert_eq!(prefix[2].second_end, 100);
+    }
+
+    #[test]
+    fn range_inside_container_excludes_the_container_itself() {
+        let containers = vec![
+            ContainerRange { index: 0, start: 100, end: 200 },
+            ContainerRange { index: 1, start: 120, end: 150 },
+        ];
+        let prefix = build_container_prefix_max(&containers);
+
+        // The container at index 0 is not "inside" any other container.
+        assert!(!is_range_inside_container(&containers, &prefix, 0, 100, 200));
+        // A foreign range fully covered by index 0 is inside.
+        assert!(is_range_inside_container(&containers, &prefix, 9, 110, 180));
+        // A range starting before any container is never inside.
+        assert!(!is_range_inside_container(&containers, &prefix, 9, 50, 60));
+    }
+
+    // ------------------------------------------------------------------
+    // Little-endian readers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn fixed_width_readers_decode_and_bounds_check() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        assert_eq!(read_u16_le(&bytes, 0).unwrap(), 0x0201);
+        assert_eq!(read_u32_le(&bytes, 0).unwrap(), 0x0403_0201);
+        assert_eq!(read_u64_le(&bytes, 0).unwrap(), 0x0807_0605_0403_0201);
+
+        assert!(matches!(read_u16_le(&bytes, 7).unwrap_err(), Error::Io(_)));
+        assert!(matches!(read_u32_le(&bytes, 5).unwrap_err(), Error::Io(_)));
+        assert!(matches!(read_u64_le(&bytes, 1).unwrap_err(), Error::Io(_)));
+    }
+
+    #[test]
+    fn find_signature_from_end_returns_last_match() {
+        let sig = 0x0605_4b50u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&sig.to_le_bytes()); // first occurrence at 0
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let second = bytes.len();
+        bytes.extend_from_slice(&sig.to_le_bytes()); // last occurrence
+        bytes.extend_from_slice(&[0xDD]);
+
+        assert_eq!(find_signature_from_end(&bytes, sig), Some(second));
+        assert_eq!(find_signature_from_end(&bytes, 0x1234_5678), None);
+    }
+
+    // ------------------------------------------------------------------
+    // ZIP structure helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn find_zip_central_directory_offset_reads_eocd() {
+        let zip = build_zip(&[ZipMember {
+            name: "a.bin",
+            data: Some(b"hi"),
+            crc32: 0,
+            time: 0,
+            date: 0,
+        }]);
+        let cdr = find_zip_central_directory_offset(&zip).unwrap();
+        assert!(cdr.is_some());
+        let cdr = cdr.unwrap();
+        // The discovered offset must point at a central directory header.
+        assert_eq!(read_u32_le(&zip, cdr).unwrap(), 0x0201_4b50);
+    }
+
+    #[test]
+    fn find_zip_central_directory_offset_handles_missing_eocd() {
+        let junk = vec![0u8; 64];
+        assert_eq!(find_zip_central_directory_offset(&junk).unwrap(), None);
+    }
+
+    #[test]
+    fn find_zip_central_directory_offset_rejects_out_of_range_offset() {
+        // EOCD that claims a central directory offset past the buffer end.
+        let mut bytes = vec![0u8; 8];
+        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes()); // sig
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // disk
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // entries this disk
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // total entries
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // cd size
+        bytes.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes()); // cd offset (out of range, not zip64 sentinel)
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        assert_eq!(find_zip_central_directory_offset(&bytes).unwrap(), None);
+    }
+
+    #[test]
+    fn zip_local_data_offset_skips_header_name_and_extra() {
+        let name = b"dir/file.bin";
+        let extra_len = 6usize;
+        let mut lfh = Vec::new();
+        lfh.extend_from_slice(&0x0403_4b50u32.to_le_bytes()); // sig
+        lfh.extend_from_slice(&[0u8; 22]); // version..sizes (offsets 4..26)
+        lfh.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name len @26
+        lfh.extend_from_slice(&(extra_len as u16).to_le_bytes()); // extra len @28
+        lfh.extend_from_slice(name);
+        lfh.extend_from_slice(&vec![0u8; extra_len]);
+        lfh.extend_from_slice(b"payload");
+
+        let offset = zip_local_data_offset(&lfh, 0).unwrap();
+        assert_eq!(offset, 30 + name.len() + extra_len);
+    }
+
+    #[test]
+    fn zip_local_data_offset_rejects_bad_signature() {
+        let mut lfh = vec![0u8; 40];
+        lfh[0..4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        assert!(matches!(zip_local_data_offset(&lfh, 0).unwrap_err(), Error::Io(_)));
+    }
+
+    #[test]
+    fn apply_zip64_extra_overrides_replaces_sentinel_values() {
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&0x0001u16.to_le_bytes()); // header id (zip64)
+        extra.extend_from_slice(&24u16.to_le_bytes()); // data size (3 * u64)
+        extra.extend_from_slice(&0x1111_2222_3333_4444u64.to_le_bytes()); // uncompressed
+        extra.extend_from_slice(&0x5555_6666_7777_8888u64.to_le_bytes()); // compressed
+        extra.extend_from_slice(&0x9999_AAAA_BBBB_CCCCu64.to_le_bytes()); // local header offset
+
+        let mut uncompressed = 0xFFFF_FFFFu64;
+        let mut compressed = 0xFFFF_FFFFu64;
+        let mut local_header = 0xFFFF_FFFFu64;
+        apply_zip64_extra_overrides(&extra, &mut uncompressed, &mut compressed, &mut local_header)
+            .unwrap();
+        assert_eq!(uncompressed, 0x1111_2222_3333_4444);
+        assert_eq!(compressed, 0x5555_6666_7777_8888);
+        assert_eq!(local_header, 0x9999_AAAA_BBBB_CCCC);
+    }
+
+    #[test]
+    fn apply_zip64_extra_overrides_leaves_non_sentinel_values() {
+        let extra: Vec<u8> = Vec::new();
+        let mut uncompressed = 10u64;
+        let mut compressed = 20u64;
+        let mut local_header = 30u64;
+        apply_zip64_extra_overrides(&extra, &mut uncompressed, &mut compressed, &mut local_header)
+            .unwrap();
+        assert_eq!((uncompressed, compressed, local_header), (10, 20, 30));
+    }
+
+    // ------------------------------------------------------------------
+    // read_socpak_extension_entries
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn read_socpak_extension_entries_extracts_stored_member() {
+        let data = b"AAAA";
+        let zip = build_zip(&[ZipMember {
+            name: "Data/a.bin",
+            data: Some(data),
+            crc32: 0x1234_5678,
+            time: 0x4321,
+            date: 0x8765,
+        }]);
+
+        let pad = 4096u64;
+        let mut buffer = vec![0xABu8; pad as usize];
+        buffer.extend_from_slice(&zip);
+        let mut reader = Cursor::new(buffer);
+
+        let raw = raw_ref("Sub/obj.socpak", pad, zip.len() as u64);
+        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        // socpak prefix ("Sub/") is prepended to the normalized inner name.
+        assert_eq!(entry.name, "Sub/Data/a.bin");
+        // Local data sits right after the 30-byte LFH and the file name.
+        let expected_data_offset = pad + 30 + "Data/a.bin".len() as u64;
+        assert_eq!(entry.offset_to_file_data, expected_data_offset);
+        assert_eq!(entry.compressed_size, data.len() as u64);
+        assert_eq!(entry.uncompressed_size, data.len() as u64);
+        assert_eq!(entry.bytes_already_written, data.len() as u64);
+        assert_eq!(entry.compression_method, CompressionMethod::Store);
+        assert_eq!(entry.crc32, 0x1234_5678);
+        assert_eq!(entry.last_mod_file_time, 0x4321);
+        assert_eq!(entry.last_mod_file_date, 0x8765);
+        assert!(!entry.encrypted);
+        assert_eq!(entry.signature, [0u8; 128]);
+        let expected_sha: [u8; 32] = Sha256::digest(data).into();
+        assert_eq!(entry.sha256, expected_sha);
+    }
+
+    #[test]
+    fn read_socpak_extension_entries_skips_directories_and_zero_size() {
+        let zip = build_zip(&[
+            ZipMember { name: "Data/a.bin", data: Some(b"hello"), crc32: 0, time: 0, date: 0 },
+            ZipMember { name: "Data/", data: None, crc32: 0, time: 0, date: 0 },
+        ]);
+
+        let mut reader = Cursor::new(zip.clone());
+        let raw = raw_ref("obj.socpak", 0, zip.len() as u64);
+        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Data/a.bin");
+    }
+
+    #[test]
+    fn read_socpak_extension_entries_returns_empty_without_eocd() {
+        let payload = vec![0u8; 128];
+        let mut reader = Cursor::new(payload.clone());
+        let raw = raw_ref("obj.socpak", 0, payload.len() as u64);
+        let entries = read_socpak_extension_entries(&mut reader, &raw).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn read_subarchive_extension_entries_returns_empty_for_unparseable_payload() {
+        let payload = vec![0u8; 256];
+        let mut reader = Cursor::new(payload.clone());
+        let raw = raw_ref("cache.p4k_subarchive.zst", 0, payload.len() as u64);
+        let entries = read_subarchive_extension_entries(&mut reader, &raw).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // raw_entry_to_v2_meta
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn raw_entry_to_v2_meta_copies_payload_bearing_entry() {
+        let mut raw = raw_ref("Data/file.bin", 8192, 256);
+        raw.crc32 = 0xCAFEF00D;
+        raw.uncompressed_size = 512;
+        raw.last_mod_file_time = 0x0102;
+        raw.last_mod_file_date = 0x0304;
+        let m = raw_entry_to_v2_meta(&raw);
+        assert_eq!(m.name, "Data/file.bin");
+        assert_eq!(m.offset_to_file_data, 8192);
+        assert_eq!(m.compressed_size, 256);
+        assert_eq!(m.uncompressed_size, 512);
+        assert_eq!(m.crc32, 0xCAFEF00D);
+        assert_eq!(m.last_mod_file_time, 0x0102);
+        assert_eq!(m.last_mod_file_date, 0x0304);
+    }
+
+    #[test]
+    fn raw_entry_to_v2_meta_zeroes_offset_for_empty_payload() {
+        let raw = raw_ref("Data/empty.bin", 8192, 0);
+        let m = raw_entry_to_v2_meta(&raw);
+        assert_eq!(m.compressed_size, 0);
+        assert_eq!(m.offset_to_file_data, 0);
+    }
+}
