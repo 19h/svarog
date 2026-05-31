@@ -13,7 +13,9 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
-use memmap2::{Advice, Mmap};
+#[cfg(unix)]
+use memmap2::Advice;
+use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 use svarog_common::BinaryReader;
 
@@ -246,6 +248,7 @@ impl P4kArchive {
         let path = path.as_ref();
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
+        #[cfg(unix)]
         let _ = mmap.advise(Advice::Sequential);
 
         let name = path
@@ -4617,6 +4620,7 @@ mod tests {
             cdr_bytes,
             names_bytes,
             2,
+            2,
             install_block,
             4096,
             stats.payload_end as usize,
@@ -4627,6 +4631,7 @@ mod tests {
             P4kArchive::parse_v2_entries_parallel(
                 cdr_bytes,
                 P4kArchive::parse_v2_names(cdr_bytes, names_bytes, 2).unwrap(),
+                2,
                 install_block,
                 4096,
                 stats.payload_end as usize,
