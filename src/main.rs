@@ -316,6 +316,12 @@ enum Commands {
         /// Hex manifest digest(s) for the v2 EOCDR: 64 hex chars for the first SHA-256, or 128 for both stored digests
         #[arg(long)]
         manifest_sha256: Option<String>,
+
+        /// Convert in place by rewriting only the metadata tail (seconds, no
+        /// payload copy). CONSUMES the source: it is renamed to the output path,
+        /// which must be on the same filesystem as the input.
+        #[arg(long)]
+        in_place: bool,
     },
 
     /// Rebuild only the metadata tail of an existing P4K v2 archive
@@ -534,8 +540,15 @@ fn main() -> Result<()> {
             output,
             sector_size,
             manifest_sha256,
+            in_place,
         } => {
-            cmd_p4k_convert_v2(&input, &output, sector_size, manifest_sha256.as_deref())?;
+            cmd_p4k_convert_v2(
+                &input,
+                &output,
+                sector_size,
+                manifest_sha256.as_deref(),
+                in_place,
+            )?;
         }
         Commands::P4kRewriteV2Tail { p4k } => {
             cmd_p4k_rewrite_v2_tail(&p4k)?;
@@ -1831,6 +1844,7 @@ fn cmd_p4k_convert_v2(
     output: &PathBuf,
     sector_size: u64,
     manifest_sha256: Option<&str>,
+    in_place: bool,
 ) -> Result<()> {
     let options = svarog::p4k::P4kWriterOptions {
         sector_size,
@@ -1838,7 +1852,7 @@ fn cmd_p4k_convert_v2(
         ..Default::default()
     };
     let mut active_pb: Option<ProgressBar> = None;
-    let stats = svarog::p4k::convert_v1_to_v2_with_progress(input, output, options, |event| {
+    let progress = |event| {
         use svarog::p4k::{P4kConvertCopyMethod, P4kConvertProgress};
 
         match event {
@@ -1926,6 +1940,7 @@ fn cmd_p4k_convert_v2(
                     P4kConvertCopyMethod::DirectIo => "parallel O_DIRECT",
                     P4kConvertCopyMethod::CopyFileRange => "copy_file_range",
                     P4kConvertCopyMethod::Buffered => "buffered copy",
+                    P4kConvertCopyMethod::InPlace => "in-place (no copy)",
                     P4kConvertCopyMethod::Empty => "no payload",
                 };
                 finish_progress_bar(
@@ -1966,7 +1981,13 @@ fn cmd_p4k_convert_v2(
                 );
             }
         }
-    })
+    };
+
+    let stats = if in_place {
+        svarog::p4k::convert_v1_to_v2_in_place_with_progress(input, output, options, progress)
+    } else {
+        svarog::p4k::convert_v1_to_v2_with_progress(input, output, options, progress)
+    }
     .context("Failed to convert P4K v1 to v2")?;
     println!(
         "Converted {} entries to {} ({} bytes, CDR at 0x{:X})",

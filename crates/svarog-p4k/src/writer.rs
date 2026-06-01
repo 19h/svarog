@@ -101,6 +101,9 @@ pub enum P4kConvertCopyMethod {
     /// Parallel `O_DIRECT` copy bypassing the page cache and inode-lock
     /// serialization (Linux).
     DirectIo,
+    /// No payload copy: the source was converted in place by rewriting only its
+    /// metadata tail.
+    InPlace,
     /// Linux `copy_file_range` copied the prefix in-kernel.
     CopyFileRange,
     /// Portable buffered userspace copy.
@@ -1240,55 +1243,33 @@ fn dump_entry_to_prepared_path(
     Ok(())
 }
 
-/// Convert a v1 P4K archive to v2.
-///
-/// The converter preserves compressed payload bytes, compression
-/// method, CRC, sizes, encryption flags, RSA signatures, and SHA-256
-/// metadata.
-pub fn convert_v1_to_v2<P, Q>(
-    input: P,
-    output: Q,
-    options: P4kWriterOptions,
-) -> Result<P4kWriteStats>
-where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
-{
-    convert_v1_to_v2_with_progress(input, output, options, |_| {})
+/// Owned result of scanning and planning a v1→v2 conversion: everything needed
+/// to materialize the v2 archive, with the source memory map already released.
+struct V1ToV2Plan {
+    entries: Vec<V2EntryMeta>,
+    extension_entries: Vec<V2EntryMeta>,
+    freelist_blocks: Vec<FreelistBlock>,
+    payload_end_unaligned: u64,
 }
 
-/// Convert a v1 P4K archive to v2 and emit structured progress events.
+/// Open a v1 archive, scan its entries, and plan the v2 metadata.
 ///
-/// The converter preserves compressed payload bytes, compression
-/// method, CRC, sizes, encryption flags, RSA signatures, and SHA-256
-/// metadata.
-pub fn convert_v1_to_v2_with_progress<P, Q, F>(
-    input: P,
-    output: Q,
-    options: P4kWriterOptions,
-    mut progress: F,
-) -> Result<P4kWriteStats>
+/// Returns fully owned metadata; the source archive (and its memory map) is
+/// dropped before returning, so callers may freely rewrite the file in place.
+fn scan_and_plan_v1_to_v2<F>(
+    input: &Path,
+    options: &P4kWriterOptions,
+    progress: &mut F,
+) -> Result<V1ToV2Plan>
 where
-    P: AsRef<Path>,
-    Q: AsRef<Path>,
     F: FnMut(P4kConvertProgress),
 {
-    validate_options(&options)?;
-
-    let input = input.as_ref();
-    let output = output.as_ref();
     progress(P4kConvertProgress::OpeningSource);
     let archive = P4kArchive::open(input)?;
     if archive.version() != P4kVersion::V1 {
         return Err(Error::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "source archive is not P4K v1",
-        )));
-    }
-    if same_existing_file(input, output)? {
-        return Err(Error::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "source and destination archive paths refer to the same file",
         )));
     }
 
@@ -1411,6 +1392,167 @@ where
         payload_bytes: payload_end_unaligned,
         freelist_blocks: freelist_blocks.len(),
     });
+
+    Ok(V1ToV2Plan {
+        entries,
+        extension_entries,
+        freelist_blocks,
+        payload_end_unaligned,
+    })
+}
+
+/// Convert a v1 P4K archive to v2.
+///
+/// The converter preserves compressed payload bytes, compression
+/// method, CRC, sizes, encryption flags, RSA signatures, and SHA-256
+/// metadata.
+pub fn convert_v1_to_v2<P, Q>(
+    input: P,
+    output: Q,
+    options: P4kWriterOptions,
+) -> Result<P4kWriteStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    convert_v1_to_v2_with_progress(input, output, options, |_| {})
+}
+
+/// Convert a v1 P4K archive to v2 in place, consuming the source file.
+///
+/// See [`convert_v1_to_v2_in_place_with_progress`].
+pub fn convert_v1_to_v2_in_place<P, Q>(
+    input: P,
+    output: Q,
+    options: P4kWriterOptions,
+) -> Result<P4kWriteStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    convert_v1_to_v2_in_place_with_progress(input, output, options, |_| {})
+}
+
+/// Convert a v1 P4K archive to v2 by rewriting only its metadata tail in place,
+/// then moving the result to `output`.
+///
+/// The v2 payload bytes are byte-for-byte identical to v1, so this skips the
+/// full-payload copy entirely — turning a multi-minute copy into a sub-second
+/// tail rewrite. **The source is consumed**: on success the source file becomes
+/// the v2 archive and is renamed to `output` (which must be on the same
+/// filesystem as the input). If anything fails after the tail is written, the
+/// converted archive is left at the input path.
+pub fn convert_v1_to_v2_in_place_with_progress<P, Q, F>(
+    input: P,
+    output: Q,
+    options: P4kWriterOptions,
+    mut progress: F,
+) -> Result<P4kWriteStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    F: FnMut(P4kConvertProgress),
+{
+    validate_options(&options)?;
+    let input = input.as_ref();
+    let output = output.as_ref();
+
+    let V1ToV2Plan {
+        entries,
+        extension_entries,
+        freelist_blocks,
+        payload_end_unaligned,
+    } = scan_and_plan_v1_to_v2(input, &options, &mut progress)?;
+
+    // No payload copy: the v1 payload bytes already are the v2 payload bytes.
+    progress(P4kConvertProgress::CopyFinished {
+        bytes: payload_end_unaligned,
+        method: P4kConvertCopyMethod::InPlace,
+    });
+    progress(P4kConvertProgress::TailStarted {
+        entry_count: entries.len(),
+        freelist_blocks: freelist_blocks.len(),
+    });
+
+    // Overwrite the v1 central directory (which sits after the payload) with the
+    // v2 metadata tail, then truncate to the new archive size.
+    let mut file = OpenOptions::new().read(true).write(true).open(input)?;
+    file.seek(SeekFrom::Start(payload_end_unaligned))?;
+    let mut out = BufWriter::with_capacity(1024 * 1024, file);
+    let stats = write_v2_tail(
+        &mut out,
+        &entries,
+        &extension_entries,
+        &freelist_blocks,
+        payload_end_unaligned,
+        &options,
+        false,
+    )?;
+    out.flush()?;
+    let file = out
+        .into_inner()
+        .map_err(|err| Error::Io(err.into_error()))?;
+    file.set_len(stats.file_size)?;
+    file.sync_all()?;
+    drop(file);
+    progress(P4kConvertProgress::TailFinished {
+        file_size: stats.file_size,
+        cdr_offset: stats.cdr_offset,
+    });
+
+    progress(P4kConvertProgress::Publishing);
+    if input != output {
+        std::fs::rename(input, output).map_err(|err| {
+            Error::Io(io::Error::new(
+                err.kind(),
+                format!(
+                    "converted {} in place but could not move it to {}: {err}. For in-place \
+                     conversion the output must be on the same filesystem as the input; the \
+                     converted v2 archive is at {}.",
+                    input.display(),
+                    output.display(),
+                    input.display()
+                ),
+            ))
+        })?;
+    }
+    progress(P4kConvertProgress::Finished { stats });
+    Ok(stats)
+}
+
+/// Convert a v1 P4K archive to v2 and emit structured progress events.
+///
+/// The converter preserves compressed payload bytes, compression
+/// method, CRC, sizes, encryption flags, RSA signatures, and SHA-256
+/// metadata.
+pub fn convert_v1_to_v2_with_progress<P, Q, F>(
+    input: P,
+    output: Q,
+    options: P4kWriterOptions,
+    mut progress: F,
+) -> Result<P4kWriteStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    F: FnMut(P4kConvertProgress),
+{
+    validate_options(&options)?;
+
+    let input = input.as_ref();
+    let output = output.as_ref();
+    if same_existing_file(input, output)? {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source and destination archive paths refer to the same file",
+        )));
+    }
+
+    let V1ToV2Plan {
+        entries,
+        extension_entries,
+        freelist_blocks,
+        payload_end_unaligned,
+    } = scan_and_plan_v1_to_v2(input, &options, &mut progress)?;
 
     let (temp_output, mut file) = create_temp_output_file(output)?;
     let result = (|| {
@@ -1621,6 +1763,459 @@ pub fn rewrite_v2_tail_in_place<P: AsRef<Path>>(path: P) -> Result<P4kWriteStats
 
     let _ = fs::remove_file(&temp_tail);
     result
+}
+
+/// Summary returned by [`delta_convert_v1_into_v2`].
+///
+/// `bytes_*` totals count compressed payload bytes (the actual bytes copied
+/// from the relevant source archive), not uncompressed sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct P4kDeltaStats {
+    /// Standard v2 write stats for the output archive.
+    pub stats: P4kWriteStats,
+    /// Number of base entries copied verbatim from the existing v2 archive
+    /// because their CIG CRC32C and sizes matched the newer v1 entry of
+    /// the same path.
+    pub entries_reused_from_existing_v2: usize,
+    /// Number of base entries pulled from the newer v1 archive (either
+    /// because they are new or because they changed content).
+    pub entries_taken_from_new_v1: usize,
+    /// Number of base entries that existed in the v2 archive but are
+    /// absent from the newer v1 archive (effectively deleted in the delta).
+    pub entries_removed: usize,
+    /// Total compressed bytes copied from the existing v2 archive.
+    pub bytes_reused_from_existing_v2: u64,
+    /// Total compressed bytes copied from the newer v1 archive.
+    pub bytes_taken_from_new_v1: u64,
+}
+
+/// Structured progress event emitted by
+/// [`delta_convert_v1_into_v2_with_progress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum P4kDeltaProgress {
+    /// Both source archives are being opened.
+    OpeningSources,
+    /// Both sources opened and basic metadata is known.
+    SourcesOpened {
+        existing_v2_entry_count: usize,
+        new_v1_entry_count: usize,
+    },
+    /// Per-entry source selection has started.
+    Planning,
+    /// Per-entry source selection is complete.
+    PlanningFinished {
+        reused_from_existing_v2: usize,
+        taken_from_new_v1: usize,
+        removed: usize,
+    },
+    /// Payload streaming into the temporary output has started.
+    Writing { total_entries: usize },
+    /// Absolute streaming progress in entry count.
+    WritingProgress { written: usize, total: usize },
+    /// Payload streaming is complete; the v2 tail is being written next.
+    WritingFinished,
+    /// Temporary output is being published to the final output path.
+    Publishing,
+    /// Delta conversion completed successfully.
+    Finished { stats: P4kDeltaStats },
+}
+
+/// Migrate updates from a newer v1 `Data.p4k` into an existing v2 archive,
+/// producing a fresh v2 archive at `output`.
+///
+/// Behaviour per base entry:
+///
+/// * Present in v1 with the same path, CIG CRC32C, sizes, compression method,
+///   and encryption flag as the existing v2 entry → the v2 archive's
+///   compressed payload bytes are copied verbatim (no decode/recompress).
+/// * Present in v1 but missing or different in v2 → v1's compressed payload
+///   bytes are copied verbatim into the v2 output.
+/// * Absent from v1 → the entry is dropped from the v2 output.
+///
+/// Extension entries (nested archive members whose payload lives inside a
+/// base entry's payload range, e.g. `*.socpak` contents) follow their
+/// containing base: when the base is kept, its extensions are kept too,
+/// and their offsets are shifted to track the base's new location.
+///
+/// The result is a fresh, freelist-free v2 archive — the install block
+/// contains only per-entry `bytes_already_written` records and no holes
+/// because every payload is written contiguously.
+pub fn delta_convert_v1_into_v2<P, Q, R>(
+    existing_v2: P,
+    new_v1: Q,
+    output: R,
+    options: P4kWriterOptions,
+) -> Result<P4kDeltaStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    R: AsRef<Path>,
+{
+    delta_convert_v1_into_v2_with_progress(existing_v2, new_v1, output, options, |_| {})
+}
+
+/// Same as [`delta_convert_v1_into_v2`] but emits structured progress events
+/// for long-running conversions of retail-size archives.
+pub fn delta_convert_v1_into_v2_with_progress<P, Q, R, F>(
+    existing_v2: P,
+    new_v1: Q,
+    output: R,
+    options: P4kWriterOptions,
+    mut progress: F,
+) -> Result<P4kDeltaStats>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    R: AsRef<Path>,
+    F: FnMut(P4kDeltaProgress),
+{
+    validate_options(&options)?;
+    let existing_v2 = existing_v2.as_ref();
+    let new_v1 = new_v1.as_ref();
+    let output = output.as_ref();
+
+    if same_existing_file(existing_v2, output)? || same_existing_file(new_v1, output)? {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "delta source and destination paths refer to the same file",
+        )));
+    }
+
+    progress(P4kDeltaProgress::OpeningSources);
+    let v2_archive = P4kArchive::open(existing_v2)?;
+    if v2_archive.version() != P4kVersion::V2 {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "existing archive at first path is not P4K v2",
+        )));
+    }
+    let v1_archive = P4kArchive::open(new_v1)?;
+    if v1_archive.version() != P4kVersion::V1 {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "newer archive at second path is not P4K v1",
+        )));
+    }
+    // Scattered local-header reads, plus payload reads from both maps, both
+    // benefit from random-access advice on retail-sized archives.
+    v2_archive.advise_random();
+    v1_archive.advise_random();
+
+    let v2_raw = v2_archive.raw_entries()?;
+    let v1_raw = v1_archive.raw_entries()?;
+    progress(P4kDeltaProgress::SourcesOpened {
+        existing_v2_entry_count: v2_raw.len(),
+        new_v1_entry_count: v1_raw.len(),
+    });
+
+    progress(P4kDeltaProgress::Planning);
+    let v2_all: Vec<V2EntryMeta> = v2_raw.iter().map(raw_entry_to_v2_meta).collect();
+    let v1_all: Vec<V2EntryMeta> = v1_raw.iter().map(raw_entry_to_v2_meta).collect();
+    let (v2_base, v2_ext) = split_container_extension_entries(v2_all, options.sector_size)?;
+    let (v1_base, v1_ext) = split_container_extension_entries(v1_all, options.sector_size)?;
+
+    let mut v2_base_by_name: HashMap<String, usize> = HashMap::with_capacity(v2_base.len());
+    for (idx, entry) in v2_base.iter().enumerate() {
+        let key = normalize_p4k_path(&entry.name, true);
+        // For duplicate-path archives (rare in practice) the *last* occurrence
+        // wins, mirroring the dispatcher's case-insensitive lookup in
+        // `P4kArchive::find`.
+        v2_base_by_name.insert(key, idx);
+    }
+
+    enum DeltaSource {
+        ExistingV2(usize),
+        NewV1(usize),
+    }
+    let mut plan: Vec<DeltaSource> = Vec::with_capacity(v1_base.len());
+    let mut reused = 0usize;
+    let mut taken = 0usize;
+    let mut bytes_reused: u64 = 0;
+    let mut bytes_taken: u64 = 0;
+
+    for (i, v1_entry) in v1_base.iter().enumerate() {
+        let key = normalize_p4k_path(&v1_entry.name, true);
+        match v2_base_by_name.get(&key) {
+            Some(&j) if delta_entry_matches(&v2_base[j], v1_entry) => {
+                plan.push(DeltaSource::ExistingV2(j));
+                reused += 1;
+                bytes_reused = bytes_reused.saturating_add(v2_base[j].compressed_size);
+            }
+            _ => {
+                plan.push(DeltaSource::NewV1(i));
+                taken += 1;
+                bytes_taken = bytes_taken.saturating_add(v1_entry.compressed_size);
+            }
+        }
+    }
+
+    let v1_names: std::collections::HashSet<String> = v1_base
+        .iter()
+        .map(|entry| normalize_p4k_path(&entry.name, true))
+        .collect();
+    let removed = v2_base
+        .iter()
+        .filter(|entry| !v1_names.contains(&normalize_p4k_path(&entry.name, true)))
+        .count();
+
+    progress(P4kDeltaProgress::PlanningFinished {
+        reused_from_existing_v2: reused,
+        taken_from_new_v1: taken,
+        removed,
+    });
+
+    let total_base = plan.len();
+    progress(P4kDeltaProgress::Writing {
+        total_entries: total_base,
+    });
+
+    let (temp_output, file) = create_temp_output_file(output)?;
+    let result = (|| -> Result<P4kDeltaStats> {
+        let v2_bytes = v2_archive.bytes();
+        let v1_bytes = v1_archive.bytes();
+        let mut writer = BufWriter::with_capacity(COPY_BUFFER_SIZE, file);
+
+        let mut new_base: Vec<V2EntryMeta> = Vec::with_capacity(total_base);
+        // For each source: map (old payload offset of kept base) → (new payload
+        // offset in the output). Extensions look up their containing base in
+        // these maps and shift by `new - old`.
+        let mut v2_kept_offsets: HashMap<u64, u64> = HashMap::new();
+        let mut v1_kept_offsets: HashMap<u64, u64> = HashMap::new();
+
+        for (idx, source) in plan.iter().enumerate() {
+            if idx % 4096 == 0 {
+                progress(P4kDeltaProgress::WritingProgress {
+                    written: idx,
+                    total: total_base,
+                });
+            }
+            let payload_start = writer.stream_position()?;
+
+            let (meta, src_bytes, kept_map) = match source {
+                DeltaSource::ExistingV2(j) => (&v2_base[*j], v2_bytes, &mut v2_kept_offsets),
+                DeltaSource::NewV1(j) => (&v1_base[*j], v1_bytes, &mut v1_kept_offsets),
+            };
+
+            if meta.compressed_size > 0 {
+                let start = usize::try_from(meta.offset_to_file_data).map_err(|_| {
+                    Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "delta source payload offset {} for {} does not fit in usize",
+                            meta.offset_to_file_data, meta.name
+                        ),
+                    ))
+                })?;
+                let len = usize::try_from(meta.compressed_size).map_err(|_| {
+                    Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "delta source payload length {} for {} does not fit in usize",
+                            meta.compressed_size, meta.name
+                        ),
+                    ))
+                })?;
+                let end = start.checked_add(len).ok_or_else(|| {
+                    Error::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("delta source payload range overflow for {}", meta.name),
+                    ))
+                })?;
+                if end > src_bytes.len() {
+                    return Err(Error::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "delta source payload extends past mmap for {} ({}..{} > {})",
+                            meta.name,
+                            start,
+                            end,
+                            src_bytes.len()
+                        ),
+                    )));
+                }
+                writer.write_all(&src_bytes[start..end])?;
+                kept_map.insert(meta.offset_to_file_data, payload_start);
+            }
+
+            // Sector-align the next entry's payload boundary to match the
+            // fresh-write path in `P4kBuilder::write_to`.
+            let after = writer.stream_position()?;
+            let aligned = align_up(after, options.sector_size)?;
+            write_zeroes(&mut writer, aligned - after)?;
+
+            new_base.push(V2EntryMeta {
+                name: meta.name.clone(),
+                offset_to_file_data: if meta.compressed_size == 0 {
+                    0
+                } else {
+                    payload_start
+                },
+                compressed_size: meta.compressed_size,
+                uncompressed_size: meta.uncompressed_size,
+                compression_method: meta.compression_method,
+                crc32: meta.crc32,
+                last_mod_file_time: meta.last_mod_file_time,
+                last_mod_file_date: meta.last_mod_file_date,
+                encrypted: meta.encrypted,
+                signature: meta.signature,
+                sha256: meta.sha256,
+                bytes_already_written: meta.bytes_already_written,
+            });
+        }
+        progress(P4kDeltaProgress::WritingProgress {
+            written: total_base,
+            total: total_base,
+        });
+
+        let mut new_ext: Vec<V2EntryMeta> = Vec::new();
+        shift_extensions_for_kept_bases(&v2_base, &v2_ext, &v2_kept_offsets, &mut new_ext)?;
+        shift_extensions_for_kept_bases(&v1_base, &v1_ext, &v1_kept_offsets, &mut new_ext)?;
+
+        let payload_end_unaligned = writer.stream_position()?;
+        progress(P4kDeltaProgress::WritingFinished);
+        let stats = write_v2_tail(
+            &mut writer,
+            &new_base,
+            &new_ext,
+            &[],
+            payload_end_unaligned,
+            &options,
+            true,
+        )?;
+        writer.flush()?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| Error::Io(err.into_error()))?;
+        file.sync_all()?;
+        drop(file);
+
+        Ok(P4kDeltaStats {
+            stats,
+            entries_reused_from_existing_v2: reused,
+            entries_taken_from_new_v1: taken,
+            entries_removed: removed,
+            bytes_reused_from_existing_v2: bytes_reused,
+            bytes_taken_from_new_v1: bytes_taken,
+        })
+    })();
+
+    progress(P4kDeltaProgress::Publishing);
+    let stats = finish_temp_output(temp_output, output, result)?;
+    progress(P4kDeltaProgress::Finished { stats });
+    Ok(stats)
+}
+
+/// Decide whether the v2 entry's compressed bytes can be reused for the
+/// matching v1 entry without round-tripping through decode + recompress.
+///
+/// We require identical CRC, compressed size, uncompressed size, compression
+/// method, *and* encryption flag. CRC alone is not enough — even on a true
+/// hash collision the compressed-byte representation could differ in subtle
+/// ways (encryption padding, different compressor settings) that would corrupt
+/// the v2 payload.
+fn delta_entry_matches(v2_entry: &V2EntryMeta, v1_entry: &V2EntryMeta) -> bool {
+    v2_entry.crc32 == v1_entry.crc32
+        && v2_entry.compressed_size == v1_entry.compressed_size
+        && v2_entry.uncompressed_size == v1_entry.uncompressed_size
+        && v2_entry.compression_method == v1_entry.compression_method
+        && v2_entry.encrypted == v1_entry.encrypted
+}
+
+/// Shift extension entries from one source archive into the output's
+/// extension-entry list, dropping any whose containing base was not kept.
+///
+/// We resolve each extension's containing base by smallest enclosing range
+/// (innermost container wins) over the bases we actually kept. This mirrors
+/// the detection convention in [`split_container_extension_entries`].
+fn shift_extensions_for_kept_bases(
+    bases: &[V2EntryMeta],
+    extensions: &[V2EntryMeta],
+    kept_base_offsets: &HashMap<u64, u64>,
+    out: &mut Vec<V2EntryMeta>,
+) -> Result<()> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
+
+    // Snapshot of kept bases sorted by start offset. We scan linearly per
+    // extension since the per-archive count of nested-archive containers is
+    // small (~hundreds at most in retail Data.p4k).
+    let mut kept_bases: Vec<&V2EntryMeta> = bases
+        .iter()
+        .filter(|entry| entry.compressed_size > 0 && kept_base_offsets.contains_key(&entry.offset_to_file_data))
+        .collect();
+    kept_bases.sort_by_key(|entry| entry.offset_to_file_data);
+
+    for ext in extensions {
+        if ext.compressed_size == 0 {
+            // Zero-length extension carries no payload to relocate; it can be
+            // emitted with offset 0, matching the fresh-write convention.
+            out.push(clone_v2_entry_with_offset(ext, 0));
+            continue;
+        }
+        let ext_end = ext.offset_to_file_data.checked_add(ext.compressed_size).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("extension entry {} payload range overflow", ext.name),
+            ))
+        })?;
+
+        let mut innermost: Option<&V2EntryMeta> = None;
+        for base in &kept_bases {
+            let base_end = base.offset_to_file_data.checked_add(base.compressed_size).ok_or_else(|| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("base entry {} payload range overflow", base.name),
+                ))
+            })?;
+            if base.offset_to_file_data <= ext.offset_to_file_data && ext_end <= base_end {
+                if innermost.map_or(true, |current| base.compressed_size < current.compressed_size) {
+                    innermost = Some(base);
+                }
+            }
+        }
+
+        let Some(base) = innermost else {
+            // Containing base was dropped (or never existed in this source's
+            // kept set). The extension cannot survive without its parent's
+            // bytes, so omit it from the output.
+            continue;
+        };
+        let new_base_offset = kept_base_offsets[&base.offset_to_file_data];
+        let relative = ext.offset_to_file_data - base.offset_to_file_data;
+        let new_offset = new_base_offset.checked_add(relative).ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("extension entry {} shifted offset overflow", ext.name),
+            ))
+        })?;
+        out.push(clone_v2_entry_with_offset(ext, new_offset));
+    }
+
+    Ok(())
+}
+
+/// Produce a fresh `V2EntryMeta` mirroring `source` but pointing at
+/// `new_offset_to_file_data`.
+///
+/// `V2EntryMeta` is intentionally not `Clone` (it owns a `String` and we want
+/// every duplication to be explicit), so the delta path uses this helper
+/// instead of `derive(Clone)`.
+fn clone_v2_entry_with_offset(source: &V2EntryMeta, new_offset_to_file_data: u64) -> V2EntryMeta {
+    V2EntryMeta {
+        name: source.name.clone(),
+        offset_to_file_data: new_offset_to_file_data,
+        compressed_size: source.compressed_size,
+        uncompressed_size: source.uncompressed_size,
+        compression_method: source.compression_method,
+        crc32: source.crc32,
+        last_mod_file_time: source.last_mod_file_time,
+        last_mod_file_date: source.last_mod_file_date,
+        encrypted: source.encrypted,
+        signature: source.signature,
+        sha256: source.sha256,
+        bytes_already_written: source.bytes_already_written,
+    }
 }
 
 fn raw_entry_to_v2_meta(raw: &crate::archive::P4kRawEntryRef<'_>) -> V2EntryMeta {

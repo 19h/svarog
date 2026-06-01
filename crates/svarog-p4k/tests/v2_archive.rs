@@ -30,7 +30,9 @@ use svarog_p4k::zip::{
 };
 use svarog_p4k::P4kArchive;
 use svarog_p4k::P4kVersion;
-use svarog_p4k::{convert_v1_to_v2, P4kBuilder, P4kWriterOptions};
+use svarog_p4k::{
+    convert_v1_to_v2, convert_v1_to_v2_in_place, P4kBuilder, P4kWriterOptions,
+};
 
 /// Compression method ID for raw / stored data.
 const CM_STORE: u32 = 0;
@@ -1970,6 +1972,57 @@ fn convert_v1_to_v2_preserves_stored_payload() {
 
     let _ = fs::remove_file(&v1);
     let _ = fs::remove_file(&v2);
+}
+
+#[test]
+fn convert_v1_to_v2_in_place_matches_copy_path_byte_for_byte() {
+    // Build one v1 source, then convert two identical copies of it: one via the
+    // copy path, one via the in-place path. The resulting v2 archives must be
+    // byte-for-byte identical, since the in-place path only avoids the payload
+    // copy — the bytes and the metadata tail are computed the same way.
+    let v1_copy = tempfile_path("svarog_p4k_inplace_src_copy_v1.p4k");
+    let v1_inplace = tempfile_path("svarog_p4k_inplace_src_inplace_v1.p4k");
+    let out_copy = tempfile_path("svarog_p4k_inplace_out_copy_v2.p4k");
+    let out_inplace = tempfile_path("svarog_p4k_inplace_out_inplace_v2.p4k");
+
+    let mut options = P4kWriterOptions::default();
+    options.sector_size = SECTOR_SIZE;
+    options.compression = CompressionMethod::Store;
+    let mut builder = P4kBuilder::with_options(options.clone());
+    builder.add_bytes("a/one.txt", b"first payload").unwrap();
+    builder.add_bytes("a/two.bin", b"second payload bytes").unwrap();
+    builder.add_bytes("b/three.dat", b"third").unwrap();
+    builder.write_v1_to_file(&v1_copy).unwrap();
+    fs::copy(&v1_copy, &v1_inplace).unwrap();
+
+    let stats_copy = convert_v1_to_v2(&v1_copy, &out_copy, options.clone()).unwrap();
+    let stats_inplace = convert_v1_to_v2_in_place(&v1_inplace, &out_inplace, options).unwrap();
+
+    assert_eq!(stats_copy.entry_count, stats_inplace.entry_count);
+    assert_eq!(stats_copy.file_size, stats_inplace.file_size);
+    assert_eq!(stats_copy.cdr_offset, stats_inplace.cdr_offset);
+
+    // The in-place source was consumed (renamed onto the output path).
+    assert!(!v1_inplace.exists(), "in-place source must be consumed");
+
+    let copy_bytes = fs::read(&out_copy).unwrap();
+    let inplace_bytes = fs::read(&out_inplace).unwrap();
+    assert_eq!(
+        copy_bytes, inplace_bytes,
+        "in-place conversion must be byte-identical to the copy path"
+    );
+
+    // And the in-place output is a valid, readable v2 archive.
+    let archive = P4kArchive::open(&out_inplace).unwrap();
+    assert_eq!(archive.version(), P4kVersion::V2);
+    assert_eq!(archive.entry_count(), 3);
+    let entry = archive.get(0).unwrap();
+    assert!(!archive.read(&entry).unwrap().is_empty());
+
+    let _ = fs::remove_file(&v1_copy);
+    let _ = fs::remove_file(&v1_inplace);
+    let _ = fs::remove_file(&out_copy);
+    let _ = fs::remove_file(&out_inplace);
 }
 
 #[test]
